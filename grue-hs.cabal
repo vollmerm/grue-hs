@@ -1,0 +1,48 @@
+cabal-version:      3.0
+name:               grue-hs
+version:            0.1.0.0
+synopsis:           A Z-Machine interpreter for classic text adventure games
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Michael Vollmer
+maintainer:         michael.vollmer90@gmail.com
+category:           Game
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:  Grue.Memory
+    build-depends:    base ^>=4.20.0.0,
+                      bytestring,
+                      containers,
+                      mtl,
+                      text
+    hs-source-dirs:   src
+    default-language: GHC2021
+
+executable grue-hs
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:    base ^>=4.20.0.0,
+                      grue-hs,
+                      text
+    hs-source-dirs:   app
+    default-language: GHC2021
+
+test-suite grue-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:    base ^>=4.20.0.0,
+                      grue-hs,
+                      bytestring,
+                      tasty,
+                      tasty-hunit,
+                      tasty-quickcheck,
+                      text
+    default-language: GHC2021
