@@ -15,7 +15,8 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Grue.Memory
+    exposed-modules:  Grue.Header
+                      Grue.Memory
     build-depends:    base ^>=4.20.0.0,
                       bytestring,
                       containers,
@@ -41,6 +42,7 @@ test-suite grue-test
     build-depends:    base ^>=4.20.0.0,
                       grue-hs,
                       bytestring,
+                      directory,
                       tasty,
                       tasty-hunit,
                       tasty-quickcheck,
