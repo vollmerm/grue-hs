@@ -15,7 +15,8 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Grue.Header
+    exposed-modules:  Grue.Dictionary
+                      Grue.Header
                       Grue.Memory
                       Grue.ZString
     build-depends:    base ^>=4.20.0.0,

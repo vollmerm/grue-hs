@@ -4,8 +4,11 @@
 module Main (main) where
 
 import Data.ByteString qualified as BS
+import Data.List (sort)
+import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.Word (Word16, Word8)
+import Grue.Dictionary
 import Grue.Header
 import Grue.Memory
 import Grue.ZString
@@ -21,7 +24,12 @@ tests :: [(FilePath, Memory)] -> TestTree
 tests stories =
   testGroup
     "grue-hs"
-    [memoryTests, headerTests, zstringTests, storyTests stories]
+    [ memoryTests
+    , headerTests
+    , zstringTests
+    , dictionaryTests
+    , storyTests stories
+    ]
 
 -- | Story files used for integration tests when available on this
 -- machine.  Missing files are skipped silently, so the suite still
@@ -87,34 +95,31 @@ memoryTests =
              in peekByte mem addr === value
     ]
 
--- | A synthetic version 3 story: a 64-byte header followed by the
--- given payload.  The abbreviations table address points at the start
--- of the payload.
-v3Story :: [Word8] -> Memory
-v3Story payload = fromStory (BS.pack (header ++ payload))
+-- | Build a synthetic version 3 story: a zeroed 64-byte header with
+-- the given word fields poked in, followed by a payload starting at
+-- address 64.
+mkStory :: [(Int, Word16)] -> [Word8] -> Memory
+mkStory fields payload = foldr (uncurry pokeWord) versioned fields
   where
-    header =
-      concatMap
-        word
-        [ (0x0300 :: Int) -- version 3, flags1 clear
-        , 0, 0x4224 -- high memory base
-        , 0x4321 -- initial program counter
-        , 0x1234 -- dictionary
-        , 0x0876 -- object table
-        , 0x0102 -- globals
-        , 0x0442 -- static memory base
-        , 0, 0, 0, 0, 0x0040 -- abbreviations
-        , 40 -- file length, stored divided by 2 in version 3
-        , 0xbeef -- checksum
-        ]
-        ++ replicate 34 0
-    -- 15 words of fields plus 34 zero bytes make the 64-byte header.
-    word w = [fromIntegral (w `div` 256), fromIntegral (w `mod` 256)]
+    versioned = pokeByte 0 3 blank
+    blank = fromStory (BS.pack (replicate 64 0 ++ payload))
 
--- | The synthetic story used by the header tests, with a recognizable
--- 16-byte payload.
+-- | The synthetic story used by the header tests, with distinctive
+-- values in every field read by 'readHeader'.
 syntheticStory :: Memory
-syntheticStory = v3Story (replicate 16 3)
+syntheticStory =
+  mkStory
+    [ (0x04, 0x4224) -- high memory base
+    , (0x06, 0x4321) -- initial program counter
+    , (0x08, 0x1234) -- dictionary
+    , (0x0a, 0x0876) -- object table
+    , (0x0c, 0x0102) -- globals
+    , (0x0e, 0x0442) -- static memory base
+    , (0x18, 0x0040) -- abbreviations
+    , (0x1a, 40) -- file length, stored divided by 2 in version 3
+    , (0x1c, 0xbeef) -- checksum
+    ]
+    (replicate 16 3)
 
 -- | Split a 16-bit word into big-endian bytes.
 wordBytes :: Word16 -> [Word8]
@@ -147,9 +152,9 @@ headerTests =
     ]
 
 -- | A story whose payload is the given Z-string words, placed at
--- address 64.
+-- address 64, with the abbreviations table also rooted there.
 zstringStory :: [Word16] -> Memory
-zstringStory = v3Story . concatMap wordBytes
+zstringStory = mkStory [(0x18, 64)] . concatMap wordBytes
 
 -- | Decode the Z-string at address 64 of a story built from the given
 -- words.
@@ -182,7 +187,7 @@ zstringTests =
         -- "hello" string stored at byte 72 (word address 36), and the
         -- string at 66 is [1,0,pad]: abbreviation 0.
         let mem =
-              v3Story . concat $
+              mkStory [(0x18, 64)] . concat $
                 [ wordBytes 36
                 , concatMap wordBytes [0x8405]
                 , [0, 0, 0, 0]
@@ -213,6 +218,51 @@ zstringTests =
           @?= "x-ray"
     ]
 
+-- | A story holding a small dictionary at address 64: separators
+-- @. , \"@, entry length 7, and four sorted words.
+dictStory :: Memory
+dictStory = mkStory [(0x08, 64)] payload
+  where
+    v3hdr = readHeader (mkStory [] [])
+    entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
+    payload =
+      [3, 46, 44, 34, 7, 0, 4]
+        ++ concatMap entry ["go", "look", "nearby", "sword"]
+
+dictionaryTests :: TestTree
+dictionaryTests =
+  testGroup
+    "Grue.Dictionary"
+    [ testCase "reads the dictionary header" $ do
+        let dict = readDictionary dictStory (readHeader dictStory)
+        dictSeparators dict @?= ".,\""
+        dictEntryLength dict @?= 7
+        dictEntryCount dict @?= 4
+        dictEntriesAddr dict @?= 71
+    , testCase "finds every word at its entry address" $ do
+        let hdr = readHeader dictStory
+            dict = readDictionary dictStory hdr
+        lookupWord dictStory hdr dict "go" @?= Just 71
+        lookupWord dictStory hdr dict "look" @?= Just 78
+        lookupWord dictStory hdr dict "nearby" @?= Just 85
+        lookupWord dictStory hdr dict "sword" @?= Just 92
+    , testCase "misses absent words" $ do
+        let hdr = readHeader dictStory
+            dict = readDictionary dictStory hdr
+        lookupWord dictStory hdr dict "xyzzy" @?= Nothing
+    , testCase "long words match by their truncation" $ do
+        let hdr = readHeader dictStory
+            dict = readDictionary dictStory hdr
+        lookupWord dictStory hdr dict "nearbyish" @?= Just 85
+    , testCase "tokenize follows the standard's example" $ do
+        let dict = readDictionary dictStory (readHeader dictStory)
+        tokenize dict "fred,go  fishing"
+          @?= [(0, "fred"), (4, ","), (5, "go"), (9, "fishing")]
+    , testCase "tokenize of empty input is empty" $ do
+        let dict = readDictionary dictStory (readHeader dictStory)
+        tokenize dict "   " @?= []
+    ]
+
 -- | Checks against real story files found on this machine.
 storyTests :: [(FilePath, Memory)] -> TestTree
 storyTests stories =
@@ -229,4 +279,20 @@ storyTests stories =
         , testCase "checksum verifies" $
             assertBool "checksum mismatch" $
               checksumValid mem (readHeader mem)
+        , testCase "dictionary words all look up" $ do
+            let hdr = readHeader mem
+                dict = readDictionary mem hdr
+                words' = allWords mem hdr dict
+            assertBool "suspiciously small dictionary" $
+              dictEntryCount dict > 100
+            -- Entries containing spaces are legal but deliberately
+            -- unmatchable (their padding differs from typed input), so
+            -- only space-free words are expected to round-trip.
+            let misses =
+                  [ w
+                  | w <- words'
+                  , not (T.any (== ' ') w)
+                  , isNothing (lookupWord mem hdr dict w)
+                  ]
+            take 5 misses @?= []
         ]
