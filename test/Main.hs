@@ -1,9 +1,14 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Test suite for the grue-hs Z-machine interpreter.
 module Main (main) where
 
 import Data.ByteString qualified as BS
+import Data.Text qualified as T
+import Data.Word (Word16, Word8)
 import Grue.Header
 import Grue.Memory
+import Grue.ZString
 import System.Directory (doesFileExist)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -13,7 +18,10 @@ main :: IO ()
 main = defaultMain . tests =<< loadStories
 
 tests :: [(FilePath, Memory)] -> TestTree
-tests stories = testGroup "grue-hs" [memoryTests, headerTests, storyTests stories]
+tests stories =
+  testGroup
+    "grue-hs"
+    [memoryTests, headerTests, zstringTests, storyTests stories]
 
 -- | Story files used for integration tests when available on this
 -- machine.  Missing files are skipped silently, so the suite still
@@ -79,10 +87,11 @@ memoryTests =
              in peekByte mem addr === value
     ]
 
--- | A synthetic version 3 story: a 64-byte header followed by a little
--- payload, with distinctive values in each field read by 'readHeader'.
-syntheticStory :: Memory
-syntheticStory = fromStory (BS.pack (header ++ payload))
+-- | A synthetic version 3 story: a 64-byte header followed by the
+-- given payload.  The abbreviations table address points at the start
+-- of the payload.
+v3Story :: [Word8] -> Memory
+v3Story payload = fromStory (BS.pack (header ++ payload))
   where
     header =
       concatMap
@@ -99,9 +108,17 @@ syntheticStory = fromStory (BS.pack (header ++ payload))
         , 0xbeef -- checksum
         ]
         ++ replicate 34 0
-    payload = replicate 16 3
     -- 15 words of fields plus 34 zero bytes make the 64-byte header.
     word w = [fromIntegral (w `div` 256), fromIntegral (w `mod` 256)]
+
+-- | The synthetic story used by the header tests, with a recognizable
+-- 16-byte payload.
+syntheticStory :: Memory
+syntheticStory = v3Story (replicate 16 3)
+
+-- | Split a 16-bit word into big-endian bytes.
+wordBytes :: Word16 -> [Word8]
+wordBytes w = [fromIntegral (w `div` 256), fromIntegral (w `mod` 256)]
 
 headerTests :: TestTree
 headerTests =
@@ -127,6 +144,73 @@ headerTests =
         -- 16 payload bytes of value 3 each; declared length 80 caps the
         -- region at end of file.
         computeChecksum syntheticStory hdr @?= 48
+    ]
+
+-- | A story whose payload is the given Z-string words, placed at
+-- address 64.
+zstringStory :: [Word16] -> Memory
+zstringStory = v3Story . concatMap wordBytes
+
+-- | Decode the Z-string at address 64 of a story built from the given
+-- words.
+decodeWords :: [Word16] -> T.Text
+decodeWords ws = decodeStringAt mem (readHeader mem) 64
+  where
+    mem = zstringStory ws
+
+zstringTests :: TestTree
+zstringTests =
+  testGroup
+    "Grue.ZString"
+    [ testCase "decodes plain lower-case text" $
+        -- "hello" is [13,10,17] [17,20,pad] with the end bit set.
+        decodeWords [0x3551, 0xc685] @?= "hello"
+    , testCase "returns the address past the end word" $ do
+        let mem = zstringStory [0x3551, 0xc685]
+        snd (decodeString mem (readHeader mem) 64) @?= 68
+    , testCase "shifts select upper case and punctuation" $
+        -- "Hi." is [4,13,14] [5,18,pad].
+        decodeWords [0x11ae, 0x9645] @?= "Hi."
+    , testCase "A2 character 7 is a new-line" $
+        decodeWords [0x94e5] @?= "\n"
+    , testCase "ZSCII escapes decode arbitrary characters" $
+        -- "@" is code 64: [5,6,2] [0? no: continuation] — z-chars
+        -- [5,6,2,0,5,5], where 2 and 0 are the halves of the code.
+        decodeWords [0x14c2, 0x80a5] @?= "@"
+    , testCase "abbreviations expand from the table" $ do
+        -- Payload: entry 0 of the abbreviations table points at the
+        -- "hello" string stored at byte 72 (word address 36), and the
+        -- string at 66 is [1,0,pad]: abbreviation 0.
+        let mem =
+              v3Story . concat $
+                [ wordBytes 36
+                , concatMap wordBytes [0x8405]
+                , [0, 0, 0, 0]
+                , concatMap wordBytes [0x3551, 0xc685]
+                ]
+        decodeStringAt mem (readHeader mem) 66 @?= "hello"
+    , testCase "the default Unicode table has 69 entries" $ do
+        zsciiToChar 155 @?= Just 'ä'
+        zsciiToChar 161 @?= Just 'ß'
+        zsciiToChar 223 @?= Just '¿'
+        zsciiToChar 224 @?= Nothing
+    , testCase "encodeWord matches the standard's worked example" $ do
+        let v4Header = (readHeader syntheticStory) {zVersion = 4}
+        encodeWord v4Header "i" @?= [0x38a5, 0x14a5, 0x94a5]
+    , testCase "encodeWord truncates to six Z-characters in version 3" $
+        encodeWord (readHeader syntheticStory) "abcdefgh"
+          @?= [0x18e8, 0xa54b]
+    , testCase "encodeWord lower-cases its input" $ do
+        let hdr = readHeader syntheticStory
+        encodeWord hdr "Sword" @?= encodeWord hdr "sword"
+    , testProperty "decode of encodeWord round-trips short words" $
+        forAll (resize 6 (listOf1 (choose ('a', 'z')))) $ \letters ->
+          let word = T.pack (take 6 letters)
+           in decodeWords (encodeWord (readHeader syntheticStory) word)
+                === word
+    , testCase "punctuation survives the dictionary encoding" $
+        decodeWords (encodeWord (readHeader syntheticStory) "x-ray")
+          @?= "x-ray"
     ]
 
 -- | Checks against real story files found on this machine.
