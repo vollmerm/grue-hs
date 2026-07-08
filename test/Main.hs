@@ -11,6 +11,7 @@ import Data.Word (Word16, Word8)
 import Grue.Dictionary
 import Grue.Header
 import Grue.Memory
+import Grue.Object qualified as Obj
 import Grue.ZString
 import System.Directory (doesFileExist)
 import Test.Tasty
@@ -20,7 +21,7 @@ import Test.Tasty.QuickCheck
 main :: IO ()
 main = defaultMain . tests =<< loadStories
 
-tests :: [(FilePath, Memory)] -> TestTree
+tests :: [Story] -> TestTree
 tests stories =
   testGroup
     "grue-hs"
@@ -28,28 +29,38 @@ tests stories =
     , headerTests
     , zstringTests
     , dictionaryTests
+    , objectTests
     , storyTests stories
     ]
 
 -- | Story files used for integration tests when available on this
--- machine.  Missing files are skipped silently, so the suite still
--- passes on machines without them.
-storyPaths :: [FilePath]
+-- machine, along with object names known to appear in them.  Missing
+-- files are skipped silently, so the suite still passes on machines
+-- without them.
+data Story = Story
+  { storyPath :: FilePath
+  , storyKnownObjects :: [T.Text]
+  , storyMemory :: Memory
+  }
+
+storyPaths :: [(FilePath, [T.Text])]
 storyPaths =
-  [ "/Users/vollmerm/Repos/zifmia/zorks/zork1.z3"
-  , "/Users/vollmerm/Repos/zifmia/zorks/minizork.z3"
-  , "/Users/vollmerm/Repos/zifmia/advent/advent.z3"
+  [ ( "/Users/vollmerm/Repos/zifmia/zorks/zork1.z3"
+    , ["West of House", "brass lantern"]
+    )
+  , ("/Users/vollmerm/Repos/zifmia/zorks/minizork.z3", ["West of House"])
+  , ("/Users/vollmerm/Repos/zifmia/advent/advent.z3", [])
   ]
 
-loadStories :: IO [(FilePath, Memory)]
+loadStories :: IO [Story]
 loadStories = fmap concat . mapM load $ storyPaths
   where
-    load path = do
+    load (path, known) = do
       exists <- doesFileExist path
       if exists
         then do
           bytes <- BS.readFile path
-          pure [(path, fromStory bytes)]
+          pure [Story path known (fromStory bytes)]
         else pure []
 
 -- | A little memory image with recognizable contents: byte @i@ holds
@@ -263,12 +274,111 @@ dictionaryTests =
         tokenize dict "   " @?= []
     ]
 
+-- | A story with a three-object tree at address 64: object 1 ("box")
+-- has children 2 and 3.  Object 1 provides properties 18 (word) and
+-- 4 (byte); the defaults table gives property 5 the value 0xab.
+objStory :: Memory
+objStory = mkStory [(0x0a, 64), (72, 0x00ab)] payload
+  where
+    defaults = replicate 62 0
+    entry (par, sib, chi, props) =
+      [0, 0, 0, 0, par, sib, chi] ++ wordBytes props
+    entries =
+      concatMap
+        entry
+        [ (0, 0, 2, 153) -- object 1
+        , (1, 3, 0, 162) -- object 2
+        , (1, 0, 0, 167) -- object 3
+        ]
+    propTable1 =
+      [1, 0x9e, 0x9d] -- short name "box" in one word
+        ++ [50, 0xca, 0xfe] -- property 18, two bytes
+        ++ [4, 7] -- property 4, one byte
+        ++ [0]
+    propTable2 = [0] ++ [36, 0x12, 0x34] ++ [0]
+    propTable3 = [0, 0]
+    payload = defaults ++ entries ++ propTable1 ++ propTable2 ++ propTable3
+
+objectTests :: TestTree
+objectTests =
+  testGroup
+    "Grue.Object"
+    [ testCase "reads tree links" $ do
+        let hdr = readHeader objStory
+        Obj.parent objStory hdr 2 @?= 1
+        Obj.sibling objStory hdr 2 @?= 3
+        Obj.child objStory hdr 1 @?= 2
+        Obj.parent objStory hdr 1 @?= 0
+    , testCase "attributes set, test, and clear" $ do
+        let hdr = readHeader objStory
+        Obj.testAttr objStory hdr 1 0 @?= False
+        let mem1 = Obj.setAttr hdr 1 0 objStory
+        Obj.testAttr mem1 hdr 1 0 @?= True
+        peekByte mem1 (64 + 62) @?= 0x80
+        let mem2 = Obj.setAttr hdr 1 31 mem1
+        Obj.testAttr mem2 hdr 1 31 @?= True
+        peekByte mem2 (64 + 62 + 3) @?= 0x01
+        let mem3 = Obj.clearAttr hdr 1 0 mem2
+        Obj.testAttr mem3 hdr 1 0 @?= False
+        Obj.testAttr mem3 hdr 1 31 @?= True
+    , testCase "reads short names" $ do
+        let hdr = readHeader objStory
+        Obj.shortName objStory hdr 1 @?= "box"
+        Obj.shortName objStory hdr 2 @?= ""
+    , testCase "property values, defaults, and writes" $ do
+        let hdr = readHeader objStory
+        Obj.propertyValue objStory hdr 1 18 @?= 0xcafe
+        Obj.propertyValue objStory hdr 1 4 @?= 7
+        Obj.propertyValue objStory hdr 1 5 @?= 0x00ab
+        Obj.propertyValue objStory hdr 1 1 @?= 0
+        let mem = Obj.putProperty hdr 1 4 0xff12 objStory
+        Obj.propertyValue mem hdr 1 4 @?= 0x12
+        let mem2 = Obj.putProperty hdr 1 18 0x5555 objStory
+        Obj.propertyValue mem2 hdr 1 18 @?= 0x5555
+    , testCase "property addresses and lengths" $ do
+        let hdr = readHeader objStory
+        Obj.propertyAddr objStory hdr 1 18 @?= 157
+        Obj.propertyAddr objStory hdr 1 4 @?= 160
+        Obj.propertyAddr objStory hdr 1 5 @?= 0
+        Obj.propertyLen objStory 157 @?= 2
+        Obj.propertyLen objStory 160 @?= 1
+        Obj.propertyLen objStory 0 @?= 0
+    , testCase "walks the property list in order" $ do
+        let hdr = readHeader objStory
+        Obj.nextProperty objStory hdr 1 0 @?= 18
+        Obj.nextProperty objStory hdr 1 18 @?= 4
+        Obj.nextProperty objStory hdr 1 4 @?= 0
+        Obj.nextProperty objStory hdr 3 0 @?= 0
+    , testCase "removeObject unlinks a first child" $ do
+        let hdr = readHeader objStory
+            mem = Obj.removeObject hdr 2 objStory
+        Obj.child mem hdr 1 @?= 3
+        Obj.parent mem hdr 2 @?= 0
+        Obj.sibling mem hdr 2 @?= 0
+    , testCase "removeObject unlinks a later sibling" $ do
+        let hdr = readHeader objStory
+            mem = Obj.removeObject hdr 3 objStory
+        Obj.child mem hdr 1 @?= 2
+        Obj.sibling mem hdr 2 @?= 0
+        Obj.parent mem hdr 3 @?= 0
+    , testCase "insertObject makes the first child" $ do
+        let hdr = readHeader objStory
+            mem = Obj.insertObject hdr 3 2 objStory
+        Obj.child mem hdr 2 @?= 3
+        Obj.parent mem hdr 3 @?= 2
+        Obj.sibling mem hdr 3 @?= 0
+        Obj.child mem hdr 1 @?= 2
+        Obj.sibling mem hdr 2 @?= 0
+    , testCase "counts the objects" $
+        Obj.objectCount objStory (readHeader objStory) @?= 3
+    ]
+
 -- | Checks against real story files found on this machine.
-storyTests :: [(FilePath, Memory)] -> TestTree
+storyTests :: [Story] -> TestTree
 storyTests stories =
   testGroup "story files" (map storyTest stories)
   where
-    storyTest (path, mem) =
+    storyTest (Story path known mem) =
       testGroup
         path
         [ testCase "is version 3" $
@@ -295,4 +405,23 @@ storyTests stories =
                   , isNothing (lookupWord mem hdr dict w)
                   ]
             take 5 misses @?= []
+        , testCase "object tree is well-founded" $ do
+            let hdr = readHeader mem
+                count = Obj.objectCount mem hdr
+                childrenOf o =
+                  takeWhile (/= 0) $
+                    iterate (Obj.sibling mem hdr) (Obj.child mem hdr o)
+                wellPlaced o =
+                  Obj.parent mem hdr o == 0
+                    || o `elem` childrenOf (Obj.parent mem hdr o)
+            assertBool "suspiciously few objects" (count > 50)
+            assertBool "orphaned object" (all wellPlaced [1 .. count])
+        , testCase "known object names appear" $ do
+            let hdr = readHeader mem
+                count = Obj.objectCount mem hdr
+                names = map (Obj.shortName mem hdr) [1 .. count]
+            sequence_
+              [ assertBool (T.unpack name ++ " missing") (name `elem` names)
+              | name <- known
+              ]
         ]

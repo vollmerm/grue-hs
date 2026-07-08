@@ -18,6 +18,7 @@ library
     exposed-modules:  Grue.Dictionary
                       Grue.Header
                       Grue.Memory
+                      Grue.Object
                       Grue.ZString
     build-depends:    base ^>=4.20.0.0,
                       bytestring,
