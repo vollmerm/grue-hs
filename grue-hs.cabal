@@ -35,6 +35,7 @@ executable grue-hs
     import:           warnings
     main-is:          Main.hs
     build-depends:    base ^>=4.20.0.0,
+                      bytestring,
                       grue-hs,
                       text
     hs-source-dirs:   app
