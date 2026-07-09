@@ -1,0 +1,365 @@
+-- | Decoding of Z-machine instructions.
+--
+-- An instruction is an opcode byte (giving the form, operand count and
+-- opcode number), operand type information, the operands themselves,
+-- and then, depending on the particular operation: a store variable, a
+-- branch offset, and inline text.  This module decodes all of the
+-- version 3 instruction set into a typed representation; execution is
+-- left to the interpreter.
+module Grue.Instruction
+  ( Op (..)
+  , Operand (..)
+  , Branch (..)
+  , BranchDest (..)
+  , Instruction (..)
+  , decode
+  , storesResult
+  , takesBranch
+  ) where
+
+import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.Text (Text)
+import Data.Word (Word16, Word8)
+import Grue.Header
+import Grue.Memory
+import Grue.ZString
+
+-- | The version 3 operations.
+data Op
+  = -- 2OP
+    Je
+  | Jl
+  | Jg
+  | DecChk
+  | IncChk
+  | Jin
+  | Test
+  | Or
+  | And
+  | TestAttr
+  | SetAttr
+  | ClearAttr
+  | Store
+  | InsertObj
+  | Loadw
+  | Loadb
+  | GetProp
+  | GetPropAddr
+  | GetNextProp
+  | Add
+  | Sub
+  | Mul
+  | Div
+  | Mod
+  | -- 1OP
+    Jz
+  | GetSibling
+  | GetChild
+  | GetParent
+  | GetPropLen
+  | Inc
+  | Dec
+  | PrintAddr
+  | RemoveObj
+  | PrintObj
+  | Ret
+  | Jump
+  | PrintPaddr
+  | Load
+  | Not
+  | -- 0OP
+    Rtrue
+  | Rfalse
+  | Print
+  | PrintRet
+  | Nop
+  | Save
+  | Restore
+  | Restart
+  | RetPopped
+  | Pop
+  | Quit
+  | NewLine
+  | ShowStatus
+  | Verify
+  | -- VAR
+    Call
+  | Storew
+  | Storeb
+  | PutProp
+  | Sread
+  | PrintChar
+  | PrintNum
+  | Random
+  | Push
+  | Pull
+  | SplitWindow
+  | SetWindow
+  | OutputStream
+  | InputStream
+  | SoundEffect
+  deriving (Eq, Show)
+
+-- | A decoded operand.  Variable operands are resolved to values at
+-- execution time, since reading variable 0 pops the stack.
+data Operand
+  = LargeConst Word16
+  | SmallConst Word8
+  | ByVariable Word8
+  deriving (Eq, Show)
+
+-- | Branch information: the truth value that causes the branch, and
+-- where it goes.
+data Branch = Branch
+  { branchWhen :: Bool
+  , branchDest :: BranchDest
+  }
+  deriving (Eq, Show)
+
+-- | Branch offsets 0 and 1 mean return from the current routine;
+-- anything else is an address computed at decode time.
+data BranchDest
+  = BranchReturnFalse
+  | BranchReturnTrue
+  | BranchAddr Int
+  deriving (Eq, Show)
+
+-- | A fully decoded instruction.
+data Instruction = Instruction
+  { instOp :: Op
+  , instOperands :: [Operand]
+  , instStore :: Maybe Word8
+  , instBranch :: Maybe Branch
+  , instText :: Maybe Text
+  }
+  deriving (Eq, Show)
+
+-- | The number of operands an opcode form declares.
+data OpCount = Count0 | Count1 | Count2 | CountVar
+  deriving (Eq, Show)
+
+-- | Look up an operation by operand count and opcode number.
+lookupOp :: OpCount -> Int -> Maybe Op
+lookupOp Count2 n = case n of
+  1 -> Just Je
+  2 -> Just Jl
+  3 -> Just Jg
+  4 -> Just DecChk
+  5 -> Just IncChk
+  6 -> Just Jin
+  7 -> Just Test
+  8 -> Just Or
+  9 -> Just And
+  10 -> Just TestAttr
+  11 -> Just SetAttr
+  12 -> Just ClearAttr
+  13 -> Just Store
+  14 -> Just InsertObj
+  15 -> Just Loadw
+  16 -> Just Loadb
+  17 -> Just GetProp
+  18 -> Just GetPropAddr
+  19 -> Just GetNextProp
+  20 -> Just Add
+  21 -> Just Sub
+  22 -> Just Mul
+  23 -> Just Div
+  24 -> Just Mod
+  _ -> Nothing
+lookupOp Count1 n = case n of
+  0 -> Just Jz
+  1 -> Just GetSibling
+  2 -> Just GetChild
+  3 -> Just GetParent
+  4 -> Just GetPropLen
+  5 -> Just Inc
+  6 -> Just Dec
+  7 -> Just PrintAddr
+  9 -> Just RemoveObj
+  10 -> Just PrintObj
+  11 -> Just Ret
+  12 -> Just Jump
+  13 -> Just PrintPaddr
+  14 -> Just Load
+  15 -> Just Not
+  _ -> Nothing
+lookupOp Count0 n = case n of
+  0 -> Just Rtrue
+  1 -> Just Rfalse
+  2 -> Just Print
+  3 -> Just PrintRet
+  4 -> Just Nop
+  5 -> Just Save
+  6 -> Just Restore
+  7 -> Just Restart
+  8 -> Just RetPopped
+  9 -> Just Pop
+  10 -> Just Quit
+  11 -> Just NewLine
+  12 -> Just ShowStatus
+  13 -> Just Verify
+  _ -> Nothing
+lookupOp CountVar n = case n of
+  0 -> Just Call
+  1 -> Just Storew
+  2 -> Just Storeb
+  3 -> Just PutProp
+  4 -> Just Sread
+  5 -> Just PrintChar
+  6 -> Just PrintNum
+  7 -> Just Random
+  8 -> Just Push
+  9 -> Just Pull
+  10 -> Just SplitWindow
+  11 -> Just SetWindow
+  19 -> Just OutputStream
+  20 -> Just InputStream
+  21 -> Just SoundEffect
+  _ -> Nothing
+
+-- | Whether an operation is followed by a store variable byte.
+storesResult :: Op -> Bool
+storesResult op =
+  op
+    `elem` [ Or
+           , And
+           , Loadw
+           , Loadb
+           , GetProp
+           , GetPropAddr
+           , GetNextProp
+           , Add
+           , Sub
+           , Mul
+           , Div
+           , Mod
+           , GetSibling
+           , GetChild
+           , GetParent
+           , GetPropLen
+           , Load
+           , Not
+           , Call
+           , Random
+           ]
+
+-- | Whether an operation is followed by branch information.
+takesBranch :: Op -> Bool
+takesBranch op =
+  op
+    `elem` [ Je
+           , Jl
+           , Jg
+           , DecChk
+           , IncChk
+           , Jin
+           , Test
+           , TestAttr
+           , Jz
+           , GetSibling
+           , GetChild
+           , Save
+           , Restore
+           , Verify
+           ]
+
+-- | Whether an operation is followed by inline text.
+takesText :: Op -> Bool
+takesText op = op == Print || op == PrintRet
+
+-- | Decode the instruction at an address.  Returns the instruction and
+-- the address of the next one.  An unknown opcode is an error: it
+-- means the story is corrupt, or execution has jumped into data.
+decode :: Memory -> Header -> Int -> (Instruction, Int)
+decode mem hdr pc0 = (inst, pcText)
+  where
+    opByte = peekByte mem pc0
+
+    (count, opNum, operandSpec, pcOperands) = case opByte of
+      b
+        | b >= 0xc0 ->
+            -- Variable form: a type byte follows the opcode.
+            ( if testBit b 5 then CountVar else Count2
+            , fromIntegral (b .&. 31)
+            , typeByteOperands (peekByte mem (pc0 + 1))
+            , pc0 + 2
+            )
+        | b >= 0x80 ->
+            -- Short form: bits 4 and 5 give the single operand's type
+            -- (11 meaning no operand at all).
+            case (b `shiftR` 4) .&. 3 of
+              3 -> (Count0, fromIntegral (b .&. 15), [], pc0 + 1)
+              t -> (Count1, fromIntegral (b .&. 15), [t], pc0 + 1)
+        | otherwise ->
+            -- Long form: always 2OP, with one type bit per operand
+            -- (0 for a small constant, 1 for a variable).
+            ( Count2
+            , fromIntegral (b .&. 31)
+            , [longType (testBit b 6), longType (testBit b 5)]
+            , pc0 + 1
+            )
+
+    longType var = if var then 2 else 1
+
+    op = case lookupOp count opNum of
+      Just o -> o
+      Nothing ->
+        error
+          ( "Grue.Instruction.decode: unknown opcode "
+              ++ show count
+              ++ ":"
+              ++ show opNum
+              ++ " at address "
+              ++ show pc0
+          )
+
+    (operands, pcStore) = readOperands operandSpec pcOperands
+
+    (store, pcBranch)
+      | storesResult op = (Just (peekByte mem pcStore), pcStore + 1)
+      | otherwise = (Nothing, pcStore)
+
+    (branch, pcAfterBranch)
+      | takesBranch op = readBranch pcBranch
+      | otherwise = (Nothing, pcBranch)
+
+    (text, pcText)
+      | takesText op =
+          let (t, end) = decodeString mem hdr pcAfterBranch
+           in (Just t, end)
+      | otherwise = (Nothing, pcAfterBranch)
+
+    inst = Instruction op operands store branch text
+
+    -- The 2-bit fields of a variable-form type byte, most significant
+    -- first, up to the first "omitted".
+    typeByteOperands tb =
+      takeWhile (/= 3) [fromIntegral (tb `shiftR` s) .&. 3 | s <- [6, 4, 2, 0]]
+
+    readOperands [] pc = ([], pc)
+    readOperands (t : ts) pc = (operand : rest, end)
+      where
+        (operand, pc') = case t of
+          0 -> (LargeConst (peekWord mem pc), pc + 2)
+          1 -> (SmallConst (peekByte mem pc), pc + 1)
+          _ -> (ByVariable (peekByte mem pc), pc + 1)
+        (rest, end) = readOperands ts pc'
+
+    readBranch pc
+      | testBit b1 6 = (branchFrom (pc + 1) (fromIntegral (b1 .&. 63)), pc + 1)
+      | otherwise = (branchFrom (pc + 2) offset14, pc + 2)
+      where
+        b1 = peekByte mem pc
+        raw =
+          (fromIntegral (b1 .&. 63) `shiftL` 8)
+            .|. fromIntegral (peekByte mem (pc + 1))
+        offset14 = if raw >= 0x2000 then raw - 0x4000 else raw
+        branchFrom after offset =
+          Just
+            Branch
+              { branchWhen = testBit b1 7
+              , branchDest = case offset of
+                  0 -> BranchReturnFalse
+                  1 -> BranchReturnTrue
+                  _ -> BranchAddr (after + offset - 2)
+              }

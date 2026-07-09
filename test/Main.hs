@@ -10,8 +10,11 @@ import Data.Text qualified as T
 import Data.Word (Word16, Word8)
 import Grue.Dictionary
 import Grue.Header
+import Grue.Instruction
+import Grue.Interp
 import Grue.Memory
 import Grue.Object qualified as Obj
+import Grue.VM
 import Grue.ZString
 import System.Directory (doesFileExist)
 import Test.Tasty
@@ -30,6 +33,8 @@ tests stories =
     , zstringTests
     , dictionaryTests
     , objectTests
+    , instructionTests
+    , interpTests
     , storyTests stories
     ]
 
@@ -40,27 +45,33 @@ tests stories =
 data Story = Story
   { storyPath :: FilePath
   , storyKnownObjects :: [T.Text]
+  , storyIntro :: [T.Text]
+    -- ^ Substrings expected in the output before the first prompt.
   , storyMemory :: Memory
   }
 
-storyPaths :: [(FilePath, [T.Text])]
+storyPaths :: [(FilePath, [T.Text], [T.Text])]
 storyPaths =
   [ ( "/Users/vollmerm/Repos/zifmia/zorks/zork1.z3"
     , ["West of House", "brass lantern"]
+    , ["ZORK I", "West of House", "mailbox"]
     )
-  , ("/Users/vollmerm/Repos/zifmia/zorks/minizork.z3", ["West of House"])
-  , ("/Users/vollmerm/Repos/zifmia/advent/advent.z3", [])
+  , ( "/Users/vollmerm/Repos/zifmia/zorks/minizork.z3"
+    , ["West of House"]
+    , ["West of House", "mailbox"]
+    )
+  , ("/Users/vollmerm/Repos/zifmia/advent/advent.z3", [], [])
   ]
 
 loadStories :: IO [Story]
 loadStories = fmap concat . mapM load $ storyPaths
   where
-    load (path, known) = do
+    load (path, known, intro) = do
       exists <- doesFileExist path
       if exists
         then do
           bytes <- BS.readFile path
-          pure [Story path known (fromStory bytes)]
+          pure [Story path known intro (fromStory bytes)]
         else pure []
 
 -- | A little memory image with recognizable contents: byte @i@ holds
@@ -373,12 +384,189 @@ objectTests =
         Obj.objectCount objStory (readHeader objStory) @?= 3
     ]
 
+-- | Decode the instruction assembled from the given bytes, placed at
+-- address 64 of an otherwise empty story.
+decodeAt :: [Word8] -> (Instruction, Int)
+decodeAt bytes = decode mem (readHeader mem) 64
+  where
+    mem = mkStory [] bytes
+
+instructionTests :: TestTree
+instructionTests =
+  testGroup
+    "Grue.Instruction"
+    [ testCase "long form with variable and small constant" $
+        decodeAt [0x54, 0x10, 0x05, 0x00]
+          @?= ( Instruction Add [ByVariable 16, SmallConst 5] (Just 0) Nothing Nothing
+              , 68
+              )
+    , testCase "short form 1OP with a large constant and short branch" $
+        decodeAt [0x80, 0x12, 0x34, 0xc5]
+          @?= ( Instruction
+                  Jz
+                  [LargeConst 0x1234]
+                  Nothing
+                  (Just (Branch True (BranchAddr 71)))
+                  Nothing
+              , 68
+              )
+    , testCase "branch offset 0 means return false" $
+        decodeAt [0x90, 0x05, 0x40]
+          @?= ( Instruction
+                  Jz
+                  [SmallConst 5]
+                  Nothing
+                  (Just (Branch False BranchReturnFalse))
+                  Nothing
+              , 67
+              )
+    , testCase "long branches are 14-bit signed" $
+        decodeAt [0x01, 0x01, 0x02, 0x3f, 0xff]
+          @?= ( Instruction
+                  Je
+                  [SmallConst 1, SmallConst 2]
+                  Nothing
+                  (Just (Branch False (BranchAddr 66)))
+                  Nothing
+              , 69
+              )
+    , testCase "variable form VAR with type byte" $
+        decodeAt [0xe0, 0x2f, 0x12, 0x34, 0x07, 0x01]
+          @?= ( Instruction
+                  Call
+                  [LargeConst 0x1234, ByVariable 7]
+                  (Just 1)
+                  Nothing
+                  Nothing
+              , 70
+              )
+    , testCase "variable form 2OP can carry three operands" $
+        decodeAt [0xc1, 0x57, 1, 2, 3, 0xc5]
+          @?= ( Instruction
+                  Je
+                  [SmallConst 1, SmallConst 2, SmallConst 3]
+                  Nothing
+                  (Just (Branch True (BranchAddr 73)))
+                  Nothing
+              , 70
+              )
+    , testCase "print carries its inline text" $
+        decodeAt [0xb2, 0x35, 0x51, 0xc6, 0x85]
+          @?= ( Instruction Print [] Nothing Nothing (Just "hello")
+              , 69
+              )
+    , testCase "get_child both stores and branches" $
+        decodeAt [0xa2, 0x05, 0x00, 0x46]
+          @?= ( Instruction
+                  GetChild
+                  [ByVariable 5]
+                  (Just 0)
+                  (Just (Branch False (BranchAddr 72)))
+                  Nothing
+              , 68
+              )
+    ]
+
+-- | Boot a story assembled from segments of bytes at absolute
+-- addresses.  The header points the program counter at 64, the
+-- dictionary at 0x100, and the globals at 0x130.
+bootProg :: [(Int, [Word8])] -> VM
+bootProg segments = boot flattened
+  where
+    mem0 = mkStory [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
+    place (addr, bytes) m =
+      foldr (\(i, b) -> pokeByte i b) m (zip [addr ..] bytes)
+    mem = foldr place mem0 segments
+    flattened = BS.pack [peekByte mem i | i <- [0 .. memorySize mem - 1]]
+
+-- | Run a program consisting of a single code segment at address 64.
+runProg :: [Word8] -> (T.Text, Stop)
+runProg code = (out, stop)
+  where
+    (out, stop, _) = run (bootProg [(64, code)])
+
+interpTests :: TestTree
+interpTests =
+  testGroup
+    "Grue.Interp"
+    [ testCase "adds and prints" $
+        runProg [0x14, 3, 4, 0x00, 0xe6, 0xbf, 0x00, 0xba]
+          @?= ("7", Halted)
+    , testCase "calls a routine with default locals" $ do
+        let main' = [0xe0, 0x3f, 0x00, 0x25, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            routine = [0x01, 0x00, 0x05, 0xab, 0x01]
+            (out, stop, _) = run (bootProg [(64, main'), (74, routine)])
+        (out, stop) @?= ("5", Halted)
+    , testCase "call arguments override default locals" $ do
+        let main' = [0xe0, 0x1f, 0x00, 0x25, 0x09, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            routine = [0x01, 0x00, 0x05, 0xab, 0x01]
+            (out, stop, _) = run (bootProg [(64, main'), (74, routine)])
+        (out, stop) @?= ("9", Halted)
+    , testCase "a taken branch skips ahead" $
+        runProg [0x03, 5, 3, 0xc5, 0xe6, 0x7f, 1, 0xe6, 0x7f, 2, 0xba]
+          @?= ("2", Halted)
+    , testCase "an untaken branch falls through" $
+        runProg [0x02, 5, 3, 0xc5, 0xe6, 0x7f, 1, 0xe6, 0x7f, 2, 0xba]
+          @?= ("12", Halted)
+    , testCase "store and inc work on globals" $
+        runProg [0x0d, 0x10, 0x01, 0x95, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+          @?= ("2", Halted)
+    , testCase "push and pull use the evaluation stack" $
+        runProg
+          [ 0xe8, 0x7f, 7
+          , 0xe8, 0x7f, 9
+          , 0xe9, 0x7f, 0x10
+          , 0xe6, 0xbf, 0x10
+          , 0xe6, 0xbf, 0x00
+          , 0xba
+          ]
+          @?= ("97", Halted)
+    , testCase "random stays in range after seeding" $ do
+        let (out, stop) =
+              runProg
+                [ 0xe7, 0x3f, 0xff, 0xfb, 0x00
+                , 0xe7, 0x7f, 3, 0x10
+                , 0xe6, 0xbf, 0x10
+                , 0xba
+                ]
+        stop @?= Halted
+        assertBool ("out of range: " ++ T.unpack out) $
+          out `elem` ["1", "2", "3"]
+    , testCase "read fills the text and parse buffers" $ do
+        let v3hdr = readHeader (mkStory [] [])
+            entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
+            dict =
+              [3, 46, 44, 34, 7, 0, 4]
+                ++ concatMap entry ["go", "look", "nearby", "sword"]
+            prog = [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0xba]
+            vm0 =
+              bootProg
+                [(64, prog), (0x100, dict), (0x180, [20]), (0x1c0, [5])]
+            (out1, stop1, vm1) = run vm0
+        (out1, stop1) @?= ("", NeedInput)
+        let vm2 = provideInput "go  EAST" vm1
+            (_, stop2, vm3) = run vm2
+            mem = vmMemory vm3
+        stop2 @?= Halted
+        -- The text buffer holds the lower-cased line, zero-terminated.
+        [peekByte mem (0x181 + i) | i <- [0 .. 8]]
+          @?= map (fromIntegral . fromEnum) "go  east\NUL"
+        -- Two words: "go" found in the dictionary, "east" not.
+        peekByte mem 0x1c1 @?= 2
+        peekWord mem 0x1c2 @?= 0x0107
+        peekByte mem 0x1c4 @?= 2
+        peekByte mem 0x1c5 @?= 1
+        peekWord mem 0x1c6 @?= 0
+        peekByte mem 0x1c8 @?= 4
+        peekByte mem 0x1c9 @?= 5
+    ]
+
 -- | Checks against real story files found on this machine.
 storyTests :: [Story] -> TestTree
 storyTests stories =
   testGroup "story files" (map storyTest stories)
   where
-    storyTest (Story path known mem) =
+    storyTest (Story path known intro mem) =
       testGroup
         path
         [ testCase "is version 3" $
@@ -423,5 +611,13 @@ storyTests stories =
             sequence_
               [ assertBool (T.unpack name ++ " missing") (name `elem` names)
               | name <- known
+              ]
+        , testCase "boots and runs to the first prompt" $ do
+            let (out, stop, _) = run (boot (originalBytes mem))
+            stop @?= NeedInput
+            assertBool "no output before the prompt" (not (T.null out))
+            sequence_
+              [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)
+              | s <- intro
               ]
         ]

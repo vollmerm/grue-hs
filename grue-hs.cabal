@@ -17,8 +17,11 @@ library
     import:           warnings
     exposed-modules:  Grue.Dictionary
                       Grue.Header
+                      Grue.Instruction
+                      Grue.Interp
                       Grue.Memory
                       Grue.Object
+                      Grue.VM
                       Grue.ZString
     build-depends:    base ^>=4.20.0.0,
                       bytestring,
