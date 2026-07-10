@@ -1,0 +1,11 @@
+no
+look
+go south
+take keys
+take lamp
+go north
+go east
+go east
+score
+quit
+y

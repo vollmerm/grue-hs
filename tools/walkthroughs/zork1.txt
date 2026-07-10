@@ -1,0 +1,30 @@
+verbose
+verify
+go north
+go east
+open window
+enter window
+go west
+take lamp and sword
+move rug
+open trap door
+turn on lamp
+inventory
+restart
+y
+look
+go south
+go east
+open window
+enter window
+take bottle and sack
+open bottle
+drink water
+go up
+turn on lamp
+go down
+go west
+examine case
+read lettering
+quit
+y

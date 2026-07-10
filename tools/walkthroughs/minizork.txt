@@ -1,0 +1,17 @@
+verbose
+look
+open mailbox
+go north
+go east
+open window
+enter window
+take all
+go west
+take lamp
+move rug
+open trap door
+turn on lamp
+go down
+score
+quit
+y
