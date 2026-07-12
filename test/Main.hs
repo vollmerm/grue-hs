@@ -532,6 +532,22 @@ interpTests =
         stop @?= Halted
         assertBool ("out of range: " ++ T.unpack out) $
           out `elem` ["1", "2", "3"]
+    , testCase "output stream 3 redirects into memory" $ do
+        -- Select a table at 0x180, print "hi" (redirected), deselect,
+        -- then print "hi" again to the screen.
+        let prog =
+              [ 0xf3, 0x4f, 0x03, 0x01, 0x80
+              , 0xb2, 0xb5, 0xc5
+              , 0xf3, 0x3f, 0xff, 0xfd
+              , 0xb2, 0xb5, 0xc5
+              , 0xba
+              ]
+            (out, stop, vm) = run (bootProg [(64, prog)])
+            mem = vmMemory vm
+        (out, stop) @?= ("hi", Halted)
+        peekWord mem 0x180 @?= 2
+        peekByte mem 0x182 @?= fromIntegral (fromEnum 'h')
+        peekByte mem 0x183 @?= fromIntegral (fromEnum 'i')
     , testCase "read fills the text and parse buffers" $ do
         let v3hdr = readHeader (mkStory [] [])
             entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]

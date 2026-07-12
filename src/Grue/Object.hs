@@ -53,34 +53,42 @@ propTableAddr mem hdr obj = fromIntegral (peekWord mem (objectAddr hdr obj + 7))
 attrLocation :: Header -> Int -> Int -> (Int, Int)
 attrLocation hdr obj attr = (objectAddr hdr obj + attr `div` 8, 7 - attr `mod` 8)
 
--- | Test an attribute flag of an object.
+-- | Test an attribute flag of an object.  Object 0 ("nothing") has no
+-- attributes; queries about it are answered blandly rather than
+-- treated as fatal, as reference interpreters do.
 testAttr :: Memory -> Header -> Int -> Int -> Bool
+testAttr _ _ 0 _ = False
 testAttr mem hdr obj attr = testBit (peekByte mem addr) bit
   where
     (addr, bit) = attrLocation hdr obj attr
 
 -- | Set an attribute flag of an object.
 setAttr :: Header -> Int -> Int -> Memory -> Memory
+setAttr _ 0 _ mem = mem
 setAttr hdr obj attr mem = pokeByte addr (setBit (peekByte mem addr) bit) mem
   where
     (addr, bit) = attrLocation hdr obj attr
 
 -- | Clear an attribute flag of an object.
 clearAttr :: Header -> Int -> Int -> Memory -> Memory
+clearAttr _ 0 _ mem = mem
 clearAttr hdr obj attr mem = pokeByte addr (clearBit (peekByte mem addr) bit) mem
   where
     (addr, bit) = attrLocation hdr obj attr
 
 -- | An object's parent (0 if none).
 parent :: Memory -> Header -> Int -> Int
+parent _ _ 0 = 0
 parent mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 4))
 
 -- | An object's next sibling (0 if none).
 sibling :: Memory -> Header -> Int -> Int
+sibling _ _ 0 = 0
 sibling mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 5))
 
 -- | An object's first child (0 if none).
 child :: Memory -> Header -> Int -> Int
+child _ _ 0 = 0
 child mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 6))
 
 setParent, setSibling, setChild :: Header -> Int -> Int -> Memory -> Memory
@@ -92,6 +100,7 @@ setChild hdr obj v = pokeByte (objectAddr hdr obj + 6) (fromIntegral v)
 -- list and leave it parentless and siblingless.  Detaching an already
 -- parentless object is a no-op.
 removeObject :: Header -> Int -> Memory -> Memory
+removeObject _ 0 mem = mem
 removeObject hdr obj mem
   | p == 0 = mem
   | otherwise =
@@ -108,6 +117,7 @@ removeObject hdr obj mem
 
 -- | Move an object to become the first child of a destination object.
 insertObject :: Header -> Int -> Int -> Memory -> Memory
+insertObject _ 0 _ mem = mem
 insertObject hdr obj dest mem =
   ( setChild hdr dest obj
       . setParent hdr obj dest
@@ -120,6 +130,7 @@ insertObject hdr obj dest mem =
 -- | An object's short name, decoded from the header of its property
 -- table.  A zero-length name has no text stored at all.
 shortName :: Memory -> Header -> Int -> Text
+shortName _ _ 0 = T.empty
 shortName mem hdr obj
   | peekByte mem base == 0 = T.empty
   | otherwise = decodeStringAt mem hdr (base + 1)
@@ -158,6 +169,7 @@ findProp mem hdr obj n = find ((== n) . propNum) (propBlocks mem hdr obj)
 -- otherwise.  One-byte properties read as their byte; longer ones as
 -- the word at the start of their data.
 propertyValue :: Memory -> Header -> Int -> Int -> Word16
+propertyValue _ _ 0 _ = 0
 propertyValue mem hdr obj n = case findProp mem hdr obj n of
   Nothing -> peekWord mem (objectTableAddr hdr + 2 * (n - 1))
   Just b
@@ -183,6 +195,7 @@ putProperty hdr obj n value mem = case findProp mem hdr obj n of
 -- | The byte address of a property's data, or 0 if the object does not
 -- provide the property.
 propertyAddr :: Memory -> Header -> Int -> Int -> Int
+propertyAddr _ _ 0 _ = 0
 propertyAddr mem hdr obj n = maybe 0 propDataAddr (findProp mem hdr obj n)
 
 -- | The length of the property whose data starts at the given address,
@@ -195,6 +208,7 @@ propertyLen mem addr = fromIntegral (peekByte mem (addr - 1)) `shiftR` 5 + 1
 -- | The number of the property listed after property @n@ of an object,
 -- or the first property when @n@ is 0, or 0 when there are no more.
 nextProperty :: Memory -> Header -> Int -> Int -> Int
+nextProperty _ _ 0 _ = 0
 nextProperty mem hdr obj n = case blocks of
   [] -> 0
   (b : _)

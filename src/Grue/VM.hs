@@ -75,6 +75,11 @@ data VM = VM
   , vmRng :: Rng
   , vmOutput :: [Text]
     -- ^ Buffered output, most recent chunk first.
+  , vmTables :: [(Int, Int)]
+    -- ^ Active memory output streams (stream 3), innermost first:
+    -- the table's byte address and the number of characters written
+    -- so far.  While any is active, output goes there instead of the
+    -- screen.
   , vmPending :: Maybe PendingInput
   }
   deriving (Eq, Show)
@@ -89,6 +94,7 @@ boot story =
     , vmFrames = baseFrame :| []
     , vmRng = seededRng 0x2a
     , vmOutput = []
+    , vmTables = []
     , vmPending = Nothing
     }
   where

@@ -134,9 +134,19 @@ signed = fromIntegral . fromIntegral @Word16 @Int16
 unsigned :: Int -> Word16
 unsigned = fromIntegral
 
--- | Emit text.
+-- | Emit text: to the screen buffer normally, or into the story's
+-- memory table while a stream 3 redirection is active (each character
+-- lands as a ZSCII byte, new-lines as code 13).
 output :: Text -> Z ()
-output = modify . emit
+output t = do
+  vm <- get
+  case vmTables vm of
+    [] -> put (emit t vm)
+    (table, count) : rest -> do
+      let codes = mapMaybe charToZscii (T.unpack t)
+          place i code = pokeByte (table + 2 + count + i) (fromIntegral code)
+          mem = foldr (uncurry place) (vmMemory vm) (zip [0 ..] codes)
+      put vm {vmMemory = mem, vmTables = (table, count + length codes) : rest}
 
 -- | Execute one decoded instruction.
 exec :: Instruction -> Z (Maybe Stop)
@@ -324,7 +334,13 @@ exec (Instruction op operands st br text) = case op of
   ShowStatus -> continue (pure ())
   SplitWindow -> continue (void (values operands))
   SetWindow -> continue (void (values operands))
-  OutputStream -> continue (void (values operands))
+  OutputStream -> continue $ do
+    vals <- values operands
+    case map signed vals of
+      (3 : table : _) -> modify $ \vm ->
+        vm {vmTables = (table, 0) : vmTables vm}
+      (-3) : _ -> modify closeTable
+      _ -> pure ()
   InputStream -> continue (void (values operands))
   SoundEffect -> continue (void (values operands))
   where
@@ -386,6 +402,17 @@ exec (Instruction op operands st br text) = case op of
        in (v, pokeVar n v vm)
 
     advance rng = snd (nextRandom 1 rng)
+
+-- | Finish the innermost memory output stream: record the character
+-- count in the table's first word, as @output_stream -3@ requires.
+closeTable :: VM -> VM
+closeTable vm = case vmTables vm of
+  [] -> vm
+  (table, count) : rest ->
+    vm
+      { vmMemory = pokeWord table (fromIntegral count) (vmMemory vm)
+      , vmTables = rest
+      }
 
 -- | Start the story over, as the @restart@ opcode requires.  Only the
 -- random generator survives.
