@@ -6,6 +6,7 @@
 -- interactive play.  No status line is shown.
 module Console (play) where
 
+import Control.Exception (IOException, try)
 import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -29,11 +30,22 @@ play story = do
       case stop of
         Halted -> finish atLineStart'
         NeedInput -> do
-          eof <- hIsEOF stdin
-          if eof
-            then finish atLineStart'
-            else do
-              line <- TIO.getLine
-              loop atLineStart' (provideInput (T.strip line) vm')
+          withLine (finish atLineStart') $ \line ->
+            loop atLineStart' (provideInput (T.strip line) vm')
+        SaveRequested bytes -> do
+          putStr "Save to file: "
+          withLine (loop True (finishSave False vm')) $ \name -> do
+            written <- try (BS.writeFile (T.unpack (T.strip name)) bytes)
+            let ok = either (\e -> const False (e :: IOException)) (const True) written
+            loop True (finishSave ok vm')
+        RestoreRequested -> do
+          putStr "Restore from file: "
+          withLine (loop True (finishRestore Nothing vm')) $ \name -> do
+            readBack <- try (BS.readFile (T.unpack (T.strip name)))
+            let bytes = either (\e -> const Nothing (e :: IOException)) Just readBack
+            loop True (finishRestore bytes vm')
     finish atLineStart =
       if atLineStart then pure () else putStrLn ""
+    withLine onEOF act = do
+      eof <- hIsEOF stdin
+      if eof then onEOF else act =<< TIO.getLine

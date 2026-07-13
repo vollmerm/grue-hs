@@ -42,6 +42,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word16, Word64, Word8)
 import Grue.Header
+import Grue.Instruction (Branch)
 import Grue.Memory
 
 -- | One routine activation.
@@ -54,14 +55,22 @@ data Frame = Frame
     -- ^ Where execution resumes after this routine returns.
   , frameStore :: Word8
     -- ^ The variable that receives this routine's return value.
+  , frameArgs :: Int
+    -- ^ How many arguments the call supplied, recorded for save files.
   }
   deriving (Eq, Show)
 
--- | A paused request for player input from the @read@ opcode.
-data PendingInput = PendingRead
-  { pendingTextBuffer :: Int
-  , pendingParseBuffer :: Int
-  }
+-- | A paused request that the frontend must complete: a line of
+-- player input, or the file transfer for a save or restore.  The save
+-- and restore cases remember the instruction's branch so the outcome
+-- can be reported to the story.
+data PendingInput
+  = PendingRead
+      { pendingTextBuffer :: Int
+      , pendingParseBuffer :: Int
+      }
+  | PendingSave Branch
+  | PendingRestore Branch
   deriving (Eq, Show)
 
 -- | The complete machine state.
@@ -100,7 +109,7 @@ boot story =
   where
     mem = fromStory story
     hdr = readHeader mem
-    baseFrame = Frame Seq.empty [] 0 0
+    baseFrame = Frame Seq.empty [] 0 0 0
 
 -- | Apply a function to the current (topmost) frame.
 onFrame :: (Frame -> Frame) -> VM -> VM

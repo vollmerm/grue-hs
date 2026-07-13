@@ -406,7 +406,7 @@ instructionTests =
                   Jz
                   [LargeConst 0x1234]
                   Nothing
-                  (Just (Branch True (BranchAddr 71)))
+                  (Just (Branch True 67 (BranchAddr 71)))
                   Nothing
               , 68
               )
@@ -416,7 +416,7 @@ instructionTests =
                   Jz
                   [SmallConst 5]
                   Nothing
-                  (Just (Branch False BranchReturnFalse))
+                  (Just (Branch False 66 BranchReturnFalse))
                   Nothing
               , 67
               )
@@ -426,7 +426,7 @@ instructionTests =
                   Je
                   [SmallConst 1, SmallConst 2]
                   Nothing
-                  (Just (Branch False (BranchAddr 66)))
+                  (Just (Branch False 67 (BranchAddr 66)))
                   Nothing
               , 69
               )
@@ -446,7 +446,7 @@ instructionTests =
                   Je
                   [SmallConst 1, SmallConst 2, SmallConst 3]
                   Nothing
-                  (Just (Branch True (BranchAddr 73)))
+                  (Just (Branch True 69 (BranchAddr 73)))
                   Nothing
               , 70
               )
@@ -461,7 +461,7 @@ instructionTests =
                   GetChild
                   [ByVariable 5]
                   (Just 0)
-                  (Just (Branch False (BranchAddr 72)))
+                  (Just (Branch False 67 (BranchAddr 72)))
                   Nothing
               , 68
               )
@@ -583,8 +583,9 @@ storyTests stories =
   testGroup "story files" (map storyTest stories)
   where
     storyTest (Story path known intro mem) =
-      testGroup
-        path
+      testGroup path (basicTests ++ saveTests)
+      where
+       basicTests =
         [ testCase "is version 3" $
             zVersion (readHeader mem) @?= 3
         , testCase "declared length fits the file" $
@@ -636,4 +637,41 @@ storyTests stories =
               [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)
               | s <- intro
               ]
+        ]
+       -- Stories that open with a yes/no question (rather than a
+       -- normal prompt) would misread these scripted commands.
+       saveTests
+        | null intro = []
+        | otherwise =
+        [ testCase "a saved game restores in a fresh machine" $ do
+            -- Play a move, save, and capture the Quetzal bytes.
+            let (_, _, vm1) = run (boot (originalBytes mem))
+                (_, s2, vm3) = run (provideInput "north" vm1)
+            s2 @?= NeedInput
+            let (_, s3, vm5) = run (provideInput "save" vm3)
+            bytes <- case s3 of
+              SaveRequested b -> pure b
+              other -> assertFailure ("expected a save request: " ++ show other)
+            -- Continue after a successful save...
+            let (outA, sA, vmA) = run (finishSave True vm5)
+            -- ...and separately, restore the bytes in a fresh machine.
+            let (_, _, f1) = run (boot (originalBytes mem))
+                (_, sR, f3) = run (provideInput "restore" f1)
+            sR @?= RestoreRequested
+            let (outB, sB, vmB) = run (finishRestore (Just bytes) f3)
+            (outB, sB) @?= (outA, sA)
+            vmPC vmB @?= vmPC vmA
+            vmFrames vmB @?= vmFrames vmA
+            let dynamic vm =
+                  [ peekByte (vmMemory vm) i
+                  | i <- [0x40 .. staticBase (vmHeader vm) - 1]
+                  ]
+            dynamic vmB @?= dynamic vmA
+        , testCase "restoring garbage reports failure to the story" $ do
+            let (_, _, vm1) = run (boot (originalBytes mem))
+                (_, sR, vm2) = run (provideInput "restore" vm1)
+            sR @?= RestoreRequested
+            let (out, stop, _) = run (finishRestore (Just "not a save") vm2)
+            stop @?= NeedInput
+            assertBool "story kept running" (not (T.null out))
         ]

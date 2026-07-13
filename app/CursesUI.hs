@@ -8,7 +8,7 @@
 -- width, with line editing at the prompt.
 module CursesUI (play) where
 
-import Control.Exception (finally)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (zipWithM_)
 import Data.ByteString qualified as BS
 import Data.Text (Text)
@@ -45,6 +45,20 @@ loop buf vm0 = do
     NeedInput -> do
       line <- editLine vm buf'
       loop (append buf' (line <> "\n")) (provideInput line vm)
+    SaveRequested bytes -> do
+      let prompt = append buf' "Save to file: "
+      name <- editLine vm prompt
+      let buf'' = append prompt (name <> "\n")
+      written <- try (BS.writeFile (T.unpack (T.strip name)) bytes)
+      let ok = either (\e -> const False (e :: IOException)) (const True) written
+      loop buf'' (finishSave ok vm)
+    RestoreRequested -> do
+      let prompt = append buf' "Restore from file: "
+      name <- editLine vm prompt
+      let buf'' = append prompt (name <> "\n")
+      readBack <- try (BS.readFile (T.unpack (T.strip name)))
+      let bytes = either (\e -> const Nothing (e :: IOException)) Just readBack
+      loop buf'' (finishRestore bytes vm)
 
 -- | Add output text to the scrollback, splitting at new-lines.
 append :: Scrollback -> Text -> Scrollback

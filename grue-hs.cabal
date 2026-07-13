@@ -21,6 +21,7 @@ library
                       Grue.Interp
                       Grue.Memory
                       Grue.Object
+                      Grue.Quetzal
                       Grue.VM
                       Grue.ZString
     build-depends:    base ^>=4.20.0.0,

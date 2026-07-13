@@ -10,6 +10,8 @@ module Grue.Interp
   ( Stop (..)
   , run
   , provideInput
+  , finishSave
+  , finishRestore
 
     -- * The status line
   , StatusLine (..)
@@ -20,6 +22,7 @@ module Grue.Interp
 import Control.Monad (void)
 import Control.Monad.State
 import Data.Bits (complement, testBit, (.&.), (.|.))
+import Data.ByteString (ByteString)
 import Data.Char (toLower)
 import Data.Int (Int16)
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -34,6 +37,7 @@ import Grue.Header
 import Grue.Instruction
 import Grue.Memory
 import Grue.Object qualified as Obj
+import Grue.Quetzal
 import Grue.VM
 import Grue.ZString
 
@@ -42,6 +46,12 @@ data Stop
   = NeedInput
     -- ^ The @read@ opcode wants a line of input; resume with
     -- 'provideInput' followed by 'run'.
+  | SaveRequested ByteString
+    -- ^ The story wants these bytes written somewhere durable; report
+    -- the outcome with 'finishSave' and 'run' again.
+  | RestoreRequested
+    -- ^ The story wants a previously saved game back; supply the file
+    -- with 'finishRestore' and 'run' again.
   | Halted
     -- ^ The story has ended.
   deriving (Eq, Show)
@@ -120,6 +130,7 @@ callRoutine packed args st = do
           , frameEval = []
           , frameReturnPC = vmPC vm
           , frameStore = fromMaybe 0 st
+          , frameArgs = length args
           }
   put
     vm
@@ -328,8 +339,17 @@ exec (Instruction op operands st br text) = case op of
     gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
   Quit -> pure (Just Halted)
   Restart -> continue $ modify restart
-  Save -> branch0 (pure False)
-  Restore -> branch0 (pure False)
+  Save -> case br of
+    Nothing -> continue (pure ())
+    Just b -> do
+      vm <- get
+      put vm {vmPending = Just (PendingSave b)}
+      pure (Just (SaveRequested (saveState vm (branchAt b))))
+  Restore -> case br of
+    Nothing -> continue (pure ())
+    Just b -> do
+      modify (\vm -> vm {vmPending = Just (PendingRestore b)})
+      pure (Just RestoreRequested)
   -- Display control, not yet meaningful for this interpreter
   ShowStatus -> continue (pure ())
   SplitWindow -> continue (void (values operands))
@@ -403,6 +423,48 @@ exec (Instruction op operands st br text) = case op of
 
     advance rng = snd (nextRandom 1 rng)
 
+-- | Report whether the requested save was written.  The story sees
+-- the outcome through the @save@ instruction's branch.
+finishSave :: Bool -> VM -> VM
+finishSave ok vm = case vmPending vm of
+  Just (PendingSave b) ->
+    execState (branchOn (Just b) ok) vm {vmPending = Nothing}
+  _ -> error "Grue.Interp.finishSave: no save is pending"
+
+-- | Complete a requested restore with the bytes of a save file (or
+-- 'Nothing' if none could be read).  On success the machine resumes
+-- from the moment of the original save, with its branch taken as
+-- true; on any failure the @restore@ instruction's branch reports it.
+finishRestore :: Maybe ByteString -> VM -> VM
+finishRestore mbytes vm = case vmPending vm of
+  Just (PendingRestore b) ->
+    case attempt =<< mbytes of
+      Just restored -> restored
+      Nothing -> execState (branchOn (Just b) False) failed
+    where
+      failed = vm {vmPending = Nothing}
+      attempt bytes = case restoreState story bytes of
+        Left _ -> Nothing
+        Right fresh -> Just (resume fresh)
+      story = originalBytes (vmMemory vm)
+      resume fresh = execState (branchOn (Just b') True) prepared
+        where
+          (b', after) = decodeBranch (vmMemory fresh) (vmPC fresh)
+          -- The transcript and fixed-pitch bits of Flags 2 survive a
+          -- restore, as the standard requires; output and randomness
+          -- carry over from the running machine.
+          flags2 =
+            peekWord (vmMemory fresh) 0x10 .&. complement 0x3
+              .|. (peekWord (vmMemory vm) 0x10 .&. 0x3)
+          prepared =
+            fresh
+              { vmPC = after
+              , vmMemory = pokeWord 0x10 flags2 (vmMemory fresh)
+              , vmOutput = vmOutput vm
+              , vmRng = vmRng vm
+              }
+  _ -> error "Grue.Interp.finishRestore: no restore is pending"
+
 -- | Finish the innermost memory output stream: record the character
 -- count in the table's first word, as @output_stream -3@ requires.
 closeTable :: VM -> VM
@@ -428,7 +490,6 @@ restart vm =
 -- parse buffer.  The machine is left ready to 'run' again.
 provideInput :: Text -> VM -> VM
 provideInput input vm = case vmPending vm of
-  Nothing -> error "Grue.Interp.provideInput: no read is pending"
   Just (PendingRead tbuf pbuf) ->
     vm {vmMemory = written, vmPending = Nothing}
     where
@@ -458,6 +519,7 @@ provideInput input vm = case vmPending vm of
         foldr (uncurry entry) m (zip [0 ..] tokens)
       counted = pokeByte (pbuf + 1) (fromIntegral (length tokens)) . parseWrites
       written = counted (terminated mem)
+  _ -> error "Grue.Interp.provideInput: no read is pending"
 
 -- | What the status line should currently show.
 data StatusLine = StatusLine

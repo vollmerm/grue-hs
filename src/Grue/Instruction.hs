@@ -13,6 +13,7 @@ module Grue.Instruction
   , BranchDest (..)
   , Instruction (..)
   , decode
+  , decodeBranch
   , storesResult
   , takesBranch
   ) where
@@ -108,10 +109,12 @@ data Operand
   | ByVariable Word8
   deriving (Eq, Show)
 
--- | Branch information: the truth value that causes the branch, and
--- where it goes.
+-- | Branch information: the truth value that causes the branch, where
+-- the branch data itself lives (needed by save files), and where the
+-- branch goes.
 data Branch = Branch
   { branchWhen :: Bool
+  , branchAt :: Int
   , branchDest :: BranchDest
   }
   deriving (Eq, Show)
@@ -320,7 +323,8 @@ decode mem hdr pc0 = (inst, pcText)
       | otherwise = (Nothing, pcStore)
 
     (branch, pcAfterBranch)
-      | takesBranch op = readBranch pcBranch
+      | takesBranch op =
+          let (b, end) = decodeBranch mem pcBranch in (Just b, end)
       | otherwise = (Nothing, pcBranch)
 
     (text, pcText)
@@ -345,21 +349,27 @@ decode mem hdr pc0 = (inst, pcText)
           _ -> (ByVariable (peekByte mem pc), pc + 1)
         (rest, end) = readOperands ts pc'
 
-    readBranch pc
-      | testBit b1 6 = (branchFrom (pc + 1) (fromIntegral (b1 .&. 63)), pc + 1)
-      | otherwise = (branchFrom (pc + 2) offset14, pc + 2)
-      where
-        b1 = peekByte mem pc
-        raw =
-          (fromIntegral (b1 .&. 63) `shiftL` 8)
-            .|. fromIntegral (peekByte mem (pc + 1))
-        offset14 = if raw >= 0x2000 then raw - 0x4000 else raw
-        branchFrom after offset =
-          Just
-            Branch
-              { branchWhen = testBit b1 7
-              , branchDest = case offset of
-                  0 -> BranchReturnFalse
-                  1 -> BranchReturnTrue
-                  _ -> BranchAddr (after + offset - 2)
-              }
+
+-- | Read the one or two bytes of branch data at an address.  Returns
+-- the branch and the address just past it.  This is also used on
+-- restore, when execution resumes at the branch data of the original
+-- @save@ instruction.
+decodeBranch :: Memory -> Int -> (Branch, Int)
+decodeBranch mem pc
+  | testBit b1 6 = (branchFrom (pc + 1) (fromIntegral (b1 .&. 63)), pc + 1)
+  | otherwise = (branchFrom (pc + 2) offset14, pc + 2)
+  where
+    b1 = peekByte mem pc
+    raw =
+      (fromIntegral (b1 .&. 63) `shiftL` 8)
+        .|. fromIntegral (peekByte mem (pc + 1)) :: Int
+    offset14 = if raw >= 0x2000 then raw - 0x4000 else raw
+    branchFrom after offset =
+      Branch
+        { branchWhen = testBit b1 7
+        , branchAt = pc
+        , branchDest = case offset of
+            0 -> BranchReturnFalse
+            1 -> BranchReturnTrue
+            _ -> BranchAddr (after + offset - 2)
+        }
