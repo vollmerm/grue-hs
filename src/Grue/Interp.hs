@@ -145,14 +145,16 @@ signed = fromIntegral . fromIntegral @Word16 @Int16
 unsigned :: Int -> Word16
 unsigned = fromIntegral
 
--- | Emit text: to the screen buffer normally, or into the story's
+-- | Emit text: to the selected window normally, or into the story's
 -- memory table while a stream 3 redirection is active (each character
 -- lands as a ZSCII byte, new-lines as code 13).
 output :: Text -> Z ()
 output t = do
   vm <- get
   case vmTables vm of
-    [] -> put (emit t vm)
+    []
+      | vmWindow vm == 1 -> put (writeUpper t vm)
+      | otherwise -> put (emit t vm)
     (table, count) : rest -> do
       let codes = mapMaybe charToZscii (T.unpack t)
           place i code = pokeByte (table + 2 + count + i) (fromIntegral code)
@@ -350,10 +352,10 @@ exec (Instruction op operands st br text) = case op of
     Just b -> do
       modify (\vm -> vm {vmPending = Just (PendingRestore b)})
       pure (Just RestoreRequested)
-  -- Display control, not yet meaningful for this interpreter
+  -- Display control
   ShowStatus -> continue (pure ())
-  SplitWindow -> continue (void (values operands))
-  SetWindow -> continue (void (values operands))
+  SplitWindow -> continue (val1 >>= modify . splitUpper . fromIntegral)
+  SetWindow -> continue (val1 >>= modify . selectWindow . fromIntegral)
   OutputStream -> continue $ do
     vals <- values operands
     case map signed vals of

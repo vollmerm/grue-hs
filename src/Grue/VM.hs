@@ -26,13 +26,19 @@ module Grue.VM
   , emit
   , takeOutput
 
+    -- * The upper window
+  , UpperWindow (..)
+  , splitUpper
+  , selectWindow
+  , writeUpper
+
     -- * Random numbers
   , Rng (..)
   , seededRng
   , nextRandom
   ) where
 
-import Data.Bits (shiftR, xor)
+import Data.Bits (shiftR, xor, (.|.))
 import Data.ByteString (ByteString)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -73,6 +79,21 @@ data PendingInput
   | PendingRestore Branch
   deriving (Eq, Show)
 
+-- | The version 3 upper window: a fixed region of the screen below
+-- the status line.  The story draws on it after selecting it with
+-- @set_window@; printing overlays whatever is already there, and the
+-- window never scrolls.
+data UpperWindow = UpperWindow
+  { upperHeight :: Int
+    -- ^ How many screen rows the window occupies.
+  , upperCursor :: (Int, Int)
+    -- ^ Where the next character lands: row and column, zero-based.
+  , upperLines :: Seq Text
+    -- ^ The window's rows, exactly 'upperHeight' of them, stored
+    -- unpadded: columns beyond a line's end are blank.
+  }
+  deriving (Eq, Show)
+
 -- | The complete machine state.
 data VM = VM
   { vmMemory :: Memory
@@ -84,6 +105,10 @@ data VM = VM
   , vmRng :: Rng
   , vmOutput :: [Text]
     -- ^ Buffered output, most recent chunk first.
+  , vmWindow :: Int
+    -- ^ The window receiving output: 0 for the scrolling lower
+    -- window, 1 for the upper.
+  , vmUpper :: UpperWindow
   , vmTables :: [(Int, Int)]
     -- ^ Active memory output streams (stream 3), innermost first:
     -- the table's byte address and the number of characters written
@@ -103,11 +128,16 @@ boot story =
     , vmFrames = baseFrame :| []
     , vmRng = seededRng 0x2a
     , vmOutput = []
+    , vmWindow = 0
+    , vmUpper = UpperWindow 0 (0, 0) Seq.empty
     , vmTables = []
     , vmPending = Nothing
     }
   where
-    mem = fromStory story
+    -- Bit 5 of Flags 1 announces to the story that screen splitting
+    -- is available.
+    mem = pokeByte 0x01 (peekByte loaded 0x01 .|. 0x20) loaded
+    loaded = fromStory story
     hdr = readHeader mem
     baseFrame = Frame Seq.empty [] 0 0 0
 
@@ -182,6 +212,44 @@ emit t vm = vm {vmOutput = t : vmOutput vm}
 -- | Remove and return all buffered output, oldest first.
 takeOutput :: VM -> (Text, VM)
 takeOutput vm = (T.concat (reverse (vmOutput vm)), vm {vmOutput = []})
+
+-- | Give the upper window a new height.  In version 3 a screen split
+-- always clears the upper window to blanks.
+splitUpper :: Int -> VM -> VM
+splitUpper n vm =
+  vm {vmUpper = UpperWindow n (0, 0) (Seq.replicate n T.empty)}
+
+-- | Select the window that receives output.  Whenever the upper
+-- window is selected, its cursor moves to the top left.
+selectWindow :: Int -> VM -> VM
+selectWindow 1 vm =
+  vm {vmWindow = 1, vmUpper = (vmUpper vm) {upperCursor = (0, 0)}}
+selectWindow _ vm = vm {vmWindow = 0}
+
+-- | Print text into the upper window at its cursor.  Characters
+-- overlay whatever is already on the row; a new-line moves to the
+-- start of the next row.  The window never scrolls, so anything
+-- printed below the bottom row is discarded.
+writeUpper :: Text -> VM -> VM
+writeUpper t vm = vm {vmUpper = go (vmUpper vm) t}
+  where
+    go w s =
+      let (chunk, rest) = T.break (== '\n') s
+       in case T.uncons rest of
+            Nothing -> overlay chunk w
+            Just (_, more) -> go (advance (overlay chunk w)) more
+    advance w = w {upperCursor = (fst (upperCursor w) + 1, 0)}
+    overlay chunk w@(UpperWindow height (row, col) ls)
+      | T.null chunk || row >= height = w
+      | otherwise =
+          w
+            { upperLines = Seq.adjust' place row ls
+            , upperCursor = (row, col + T.length chunk)
+            }
+      where
+        place line =
+          let padded = line <> T.replicate (col - T.length line) (T.singleton ' ')
+           in T.take col padded <> chunk <> T.drop (col + T.length chunk) padded
 
 -- | A small splitmix-style pseudo-random number generator.  The
 -- Z-machine only needs uniform values in small ranges, and keeping the

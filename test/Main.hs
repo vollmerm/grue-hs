@@ -3,7 +3,9 @@
 -- | Test suite for the grue-hs Z-machine interpreter.
 module Main (main) where
 
+import Data.Bits (testBit)
 import Data.ByteString qualified as BS
+import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
 import Data.Word (Word16, Word8)
@@ -530,7 +532,11 @@ bootProg segments = boot flattened
 runProg :: [Word8] -> (T.Text, Stop)
 runProg code = (out, stop)
   where
-    (out, stop, _) = run (bootProg [(64, code)])
+    (out, stop, _) = runProgVM code
+
+-- | Like 'runProg', but also expose the final machine state.
+runProgVM :: [Word8] -> (T.Text, Stop, VM)
+runProgVM code = run (bootProg [(64, code)])
 
 interpTests :: TestTree
 interpTests =
@@ -595,6 +601,47 @@ interpTests =
         peekWord mem 0x180 @?= 2
         peekByte mem 0x182 @?= fromIntegral (fromEnum 'h')
         peekByte mem 0x183 @?= fromIntegral (fromEnum 'i')
+    , testCase "boot announces screen splitting in Flags 1" $ do
+        let (_, _, vm) = runProgVM [0xba]
+        assertBool "Flags 1 bit 5 clear" $
+          testBit (peekByte (vmMemory vm) 0x01) 5
+    , testCase "upper window text overlays and stays out of output" $ do
+        -- Split off two rows, print "hi" up top, "hi" below, then
+        -- reselect the upper window (cursor back to the top left) and
+        -- overprint "X".
+        let prog =
+              [ 0xea, 0x7f, 2 -- split_window 2
+              , 0xeb, 0x7f, 1 -- set_window 1
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xeb, 0x7f, 0 -- set_window 0
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xeb, 0x7f, 1 -- set_window 1
+              , 0xb2, 0x93, 0xa5 -- print "X"
+              , 0xba
+              ]
+            (out, stop, vm) = runProgVM prog
+        (out, stop) @?= ("hi", Halted)
+        toList (upperLines (vmUpper vm)) @?= ["Xi", ""]
+    , testCase "the upper window never scrolls" $ do
+        -- In a one-row window, "a" lands on the row and the text
+        -- after the new-line falls off the bottom.
+        let printANewlineB = [0xb2, 0x18, 0xa7, 0x9c, 0xa5] -- print "a^b"
+            splitTo n =
+              [0xea, 0x7f, n, 0xeb, 0x7f, 1] ++ printANewlineB ++ [0xba]
+            (_, _, clipped) = runProgVM (splitTo 1)
+            (_, _, roomy) = runProgVM (splitTo 2)
+        toList (upperLines (vmUpper clipped)) @?= ["a"]
+        toList (upperLines (vmUpper roomy)) @?= ["a", "b"]
+    , testCase "splitting clears the upper window" $ do
+        let prog =
+              [ 0xea, 0x7f, 1 -- split_window 1
+              , 0xeb, 0x7f, 1 -- set_window 1
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xea, 0x7f, 1 -- split_window 1 again
+              , 0xba
+              ]
+            (_, _, vm) = runProgVM prog
+        toList (upperLines (vmUpper vm)) @?= [""]
     , testCase "read fills the text and parse buffers" $ do
         let v3hdr = readHeader (mkStory [] [])
             entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]

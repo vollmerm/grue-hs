@@ -11,6 +11,7 @@ module CursesUI (play) where
 import Control.Exception (IOException, finally, try)
 import Control.Monad (zipWithM_)
 import Data.ByteString qualified as BS
+import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Grue.Interp
@@ -84,29 +85,46 @@ editLine vm buf = edit ""
           | c >= ' ' -> edit (input <> T.singleton c)
         _ -> edit input
 
--- | Redraw the whole screen: status line, story text, pending input.
+-- | Redraw the whole screen: status line, any upper window, story
+-- text, pending input.
 render :: VM -> Scrollback -> Text -> IO ()
 render vm buf input = do
   (rows, cols) <- Curses.scrSize
   Curses.erase
-  drawStatus cols (statusLine vm)
+  top <- drawTop vm cols
   let width = max 20 (cols - 1)
-      textRows = rows - 1
+      textRows = max 1 (rows - top)
       wrapped = concatMap (wrapLine width) (reverse (withInput buf))
       visible = lastN textRows wrapped
   zipWithM_
     (\r line -> Curses.mvWAddStr Curses.stdScr r 0 (T.unpack line))
-    [1 ..]
+    [top ..]
     visible
-  let cursorRow = length visible
+  let cursorRow = top + length visible - 1
       cursorCol = maybe 0 T.length (lastMaybe visible)
-  Curses.wMove Curses.stdScr (max 1 cursorRow) (min (cols - 1) cursorCol)
+  Curses.wMove Curses.stdScr (max top cursorRow) (min (cols - 1) cursorCol)
   Curses.refresh
   where
     withInput [] = [input]
     withInput (open : rest) = (open <> input) : rest
-    lastN n xs = drop (max 0 (length xs - n)) xs
     lastMaybe xs = if null xs then Nothing else Just (last xs)
+
+-- | Draw the fixed top of the screen -- the status line and the
+-- story's upper window, if split -- returning the first row left for
+-- scrolling story text.
+drawTop :: VM -> Int -> IO Int
+drawTop vm cols = do
+  drawStatus cols (statusLine vm)
+  zipWithM_
+    (\r line ->
+       Curses.mvWAddStr Curses.stdScr r 0 (T.unpack (T.take (cols - 1) line)))
+    [1 ..]
+    (toList (upperLines (vmUpper vm)))
+  pure (1 + upperHeight (vmUpper vm))
+
+-- | The last @n@ elements of a list.
+lastN :: Int -> [a] -> [a]
+lastN n xs = drop (max 0 (length xs - n)) xs
 
 -- | Draw the reverse-video status bar on the top row.
 drawStatus :: Int -> StatusLine -> IO ()
