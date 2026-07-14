@@ -4,8 +4,7 @@
 module Main (main) where
 
 import Data.ByteString qualified as BS
-import Data.List (sort)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
 import Data.Word (Word16, Word8)
 import Grue.Dictionary
@@ -17,6 +16,8 @@ import Grue.Object qualified as Obj
 import Grue.VM
 import Grue.ZString
 import System.Directory (doesFileExist)
+import System.Environment (lookupEnv)
+import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
@@ -38,41 +39,87 @@ tests stories =
     , storyTests stories
     ]
 
--- | Story files used for integration tests when available on this
--- machine, along with object names known to appear in them.  Missing
--- files are skipped silently, so the suite still passes on machines
--- without them.
+-- | A story file used for integration tests, with facts the tests
+-- check against it.  One small, freely distributable story is bundled
+-- with the repository; commercial story files are looked up in an
+-- external collection (see 'storyRoot') and skipped when absent.
+data StorySpec = StorySpec
+  { specLocation :: StoryLocation
+  , specKnownObjects :: [T.Text]
+    -- ^ Object names that must appear in the object table.
+  , specIntro :: [T.Text]
+    -- ^ Substrings expected in the output before the first prompt.
+    -- Empty also marks stories that open with a yes\/no question
+    -- rather than a command prompt, which the save tests skip.
+  , specMinWords :: Int
+    -- ^ Sanity floor for the dictionary size.
+  , specMinObjects :: Int
+    -- ^ Sanity floor for the object count.
+  }
+
+-- | Bundled stories live at a path relative to the repository;
+-- external ones are relative to the story collection.
+data StoryLocation = Bundled FilePath | External FilePath
+
+storySpecs :: [StorySpec]
+storySpecs =
+  [ StorySpec
+      { specLocation = Bundled "test/stories/cloak.z3"
+      , specKnownObjects = ["Foyer of the Opera House", "small brass hook"]
+      , specIntro = ["Cloak of Darkness", "Foyer of the Opera House"]
+      , specMinWords = 100
+      , specMinObjects = 10
+      }
+  , StorySpec
+      { specLocation = External "zorks/zork1.z3"
+      , specKnownObjects = ["West of House", "brass lantern"]
+      , specIntro = ["ZORK I", "West of House", "mailbox"]
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , StorySpec
+      { specLocation = External "zorks/minizork.z3"
+      , specKnownObjects = ["West of House"]
+      , specIntro = ["West of House", "mailbox"]
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , StorySpec
+      { specLocation = External "advent/advent.z3"
+      , specKnownObjects = []
+      , specIntro = []
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  ]
+
+-- | Where the external story collection lives: the @GRUE_STORY_DIR@
+-- environment variable, or a @zifmia@ checkout beside this repository.
+storyRoot :: IO FilePath
+storyRoot = fromMaybe "../zifmia" <$> lookupEnv "GRUE_STORY_DIR"
+
+-- | A story that was found and loaded.
 data Story = Story
   { storyPath :: FilePath
-  , storyKnownObjects :: [T.Text]
-  , storyIntro :: [T.Text]
-    -- ^ Substrings expected in the output before the first prompt.
+  , storySpec :: StorySpec
   , storyMemory :: Memory
   }
 
-storyPaths :: [(FilePath, [T.Text], [T.Text])]
-storyPaths =
-  [ ( "/Users/vollmerm/Repos/zifmia/zorks/zork1.z3"
-    , ["West of House", "brass lantern"]
-    , ["ZORK I", "West of House", "mailbox"]
-    )
-  , ( "/Users/vollmerm/Repos/zifmia/zorks/minizork.z3"
-    , ["West of House"]
-    , ["West of House", "mailbox"]
-    )
-  , ("/Users/vollmerm/Repos/zifmia/advent/advent.z3", [], [])
-  ]
-
 loadStories :: IO [Story]
-loadStories = fmap concat . mapM load $ storyPaths
-  where
-    load (path, known, intro) = do
-      exists <- doesFileExist path
-      if exists
-        then do
-          bytes <- BS.readFile path
-          pure [Story path known intro (fromStory bytes)]
-        else pure []
+loadStories = do
+  root <- storyRoot
+  let resolve loc = case loc of
+        Bundled path -> path
+        External path -> root </> path
+      load spec = do
+        let path = resolve (specLocation spec)
+        exists <- doesFileExist path
+        if exists
+          then do
+            bytes <- BS.readFile path
+            pure [Story path spec (fromStory bytes)]
+          else pure []
+  concat <$> mapM load storySpecs
 
 -- | A little memory image with recognizable contents: byte @i@ holds
 -- value @i@ for the first 256 bytes.
@@ -582,9 +629,13 @@ storyTests :: [Story] -> TestTree
 storyTests stories =
   testGroup "story files" (map storyTest stories)
   where
-    storyTest (Story path known intro mem) =
-      testGroup path (basicTests ++ saveTests)
+    storyTest story =
+      testGroup (storyPath story) (basicTests ++ saveTests)
       where
+       spec = storySpec story
+       mem = storyMemory story
+       known = specKnownObjects spec
+       intro = specIntro spec
        basicTests =
         [ testCase "is version 3" $
             zVersion (readHeader mem) @?= 3
@@ -599,7 +650,7 @@ storyTests stories =
                 dict = readDictionary mem hdr
                 words' = allWords mem hdr dict
             assertBool "suspiciously small dictionary" $
-              dictEntryCount dict > 100
+              dictEntryCount dict >= specMinWords spec
             -- Entries containing spaces are legal but deliberately
             -- unmatchable (their padding differs from typed input), so
             -- only space-free words are expected to round-trip.
@@ -619,7 +670,9 @@ storyTests stories =
                 wellPlaced o =
                   Obj.parent mem hdr o == 0
                     || o `elem` childrenOf (Obj.parent mem hdr o)
-            assertBool "suspiciously few objects" (count > 50)
+            assertBool
+              "suspiciously few objects"
+              (count >= specMinObjects spec)
             assertBool "orphaned object" (all wellPlaced [1 .. count])
         , testCase "known object names appear" $ do
             let hdr = readHeader mem

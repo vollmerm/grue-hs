@@ -54,6 +54,7 @@ test-suite grue-test
                       grue-hs,
                       bytestring,
                       directory,
+                      filepath,
                       tasty,
                       tasty-hunit,
                       tasty-quickcheck,
