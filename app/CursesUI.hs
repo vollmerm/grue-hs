@@ -36,7 +36,7 @@ play story =
 loop :: Scrollback -> VM -> IO ()
 loop buf vm0 = do
   let (out, stop, vm) = run vm0
-      buf' = append buf out
+  buf' <- addOutput vm buf out
   case stop of
     Halted -> do
       let final = append buf' "\n[The story has ended. Press any key.]"
@@ -67,6 +67,48 @@ append [] t = append [""] t
 append (open : rest) t = case T.split (== '\n') t of
   [] -> open : rest
   (s : ss) -> take scrollbackLimit (reverse ss ++ (open <> s) : rest)
+
+-- | Add story output to the scrollback, pausing on a "[MORE]" prompt
+-- whenever more than a screenful arrives at once, so nothing scrolls
+-- past unread.
+addOutput :: VM -> Scrollback -> Text -> IO Scrollback
+addOutput vm buf out = do
+  (rows, cols) <- Curses.scrSize
+  let width = max 20 (cols - 1)
+      top = 1 + upperHeight (vmUpper vm)
+      textRows = max 1 (rows - top)
+      pageRows = max 1 (textRows - 1)
+      buf' = append buf out
+      allRows = concatMap (wrapLine width) (reverse buf')
+      total = length allRows
+      -- How many display rows still need reading: the rows of every
+      -- line the output touches, including the open line it extends.
+      open = case buf of
+        (o : _) -> o
+        [] -> ""
+      touched = case T.split (== '\n') out of
+        [] -> []
+        (s : ss) -> (open <> s) : ss
+      new = sum (map (length . wrapLine width) touched)
+      reveal k = do
+        Curses.erase
+        _ <- drawTop vm cols
+        zipWithM_
+          (\r line -> Curses.mvWAddStr Curses.stdScr r 0 (T.unpack line))
+          [top ..]
+          (lastN pageRows (take k allRows))
+        Curses.wAttrSet Curses.stdScr (Curses.setReverse Curses.attr0 True, Curses.Pair 0)
+        Curses.mvWAddStr Curses.stdScr (rows - 1) 0 "[MORE]"
+        Curses.wAttrSet Curses.stdScr (Curses.attr0, Curses.Pair 0)
+        Curses.refresh
+      page k
+        | total - k <= textRows = pure buf'
+        | otherwise = do
+            let k' = min total (k + pageRows)
+            reveal k'
+            _ <- CursesHelper.getKey (reveal k')
+            page k'
+  page (max 0 (total - new))
 
 -- | Read one line of input, echoing at the end of the scrollback.
 editLine :: VM -> Scrollback -> IO Text
