@@ -538,6 +538,16 @@ runProg code = (out, stop)
 runProgVM :: [Word8] -> (T.Text, Stop, VM)
 runProgVM code = run (bootProg [(64, code)])
 
+-- | A small dictionary for programs that read input: separators
+-- @. , \"@, entry length 7, and four sorted words.
+dictBytes :: [Word8]
+dictBytes =
+  [3, 46, 44, 34, 7, 0, 4]
+    ++ concatMap entry ["go", "look", "nearby", "sword"]
+  where
+    v3hdr = readHeader (mkStory [] [])
+    entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
+
 interpTests :: TestTree
 interpTests =
   testGroup
@@ -642,16 +652,60 @@ interpTests =
               ]
             (_, _, vm) = runProgVM prog
         toList (upperLines (vmUpper vm)) @?= [""]
-    , testCase "read fills the text and parse buffers" $ do
-        let v3hdr = readHeader (mkStory [] [])
-            entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
-            dict =
-              [3, 46, 44, 34, 7, 0, 4]
-                ++ concatMap entry ["go", "look", "nearby", "sword"]
-            prog = [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0xba]
+    , testCase "output_stream 2 transcribes and tracks Flags 2" $ do
+        let prog =
+              [ 0xf3, 0x7f, 0x02 -- output_stream 2
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xf3, 0x3f, 0xff, 0xfe -- output_stream -2
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xba
+              ]
+            (out, stop, vm) = runProgVM prog
+        (out, stop) @?= ("hihi", Halted)
+        fst (takeTranscript vm) @?= "hi"
+        transcriptOn vm @?= False
+    , testCase "the story can start a transcript through Flags 2" $ do
+        let prog =
+              [ 0xe2, 0x57, 0x10, 0x01, 0x01 -- storeb 0x10 1 1
+              , 0xb2, 0xb5, 0xc5 -- print "hi"
+              , 0xba
+              ]
+            (_, _, vm) = runProgVM prog
+        fst (takeTranscript vm) @?= "hi"
+    , localOption (mkTimeout 2000000) $
+        testCase "restart preserves the transcript bit" $ do
+          -- Branch past the restart once the transcript bit is found
+          -- set; a lost bit would loop forever (hence the timeout).
+          let prog =
+                [ 0x10, 0x10, 0x01, 0x00 -- loadb 0x10 1 -> sp
+                , 0x41, 0x00, 0x01, 0xc6 -- je sp 1 ?past-restart
+                , 0xf3, 0x7f, 0x02 -- output_stream 2
+                , 0xb7 -- restart
+                , 0xb2, 0xb5, 0xc5 -- print "hi"
+                , 0xba
+                ]
+              (out, stop, vm) = runProgVM prog
+          (out, stop) @?= ("hi", Halted)
+          fst (takeTranscript vm) @?= "hi"
+    , testCase "input echoes into a running transcript" $ do
+        let prog =
+              [ 0xf3, 0x7f, 0x02 -- output_stream 2
+              , 0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0 -- sread
+              , 0xba
+              ]
             vm0 =
               bootProg
-                [(64, prog), (0x100, dict), (0x180, [20]), (0x1c0, [5])]
+                [(64, prog), (0x100, dictBytes), (0x180, [20]), (0x1c0, [5])]
+            (_, s1, vm1) = run vm0
+        s1 @?= NeedInput
+        let (_, s2, vm2) = run (provideInput "go east" vm1)
+        s2 @?= Halted
+        fst (takeTranscript vm2) @?= "go east\n"
+    , testCase "read fills the text and parse buffers" $ do
+        let prog = [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0xba]
+            vm0 =
+              bootProg
+                [(64, prog), (0x100, dictBytes), (0x180, [20]), (0x1c0, [5])]
             (out1, stop1, vm1) = run vm0
         (out1, stop1) @?= ("", NeedInput)
         let vm2 = provideInput "go  EAST" vm1

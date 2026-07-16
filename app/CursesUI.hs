@@ -14,6 +14,7 @@ import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Grue.Interp
 import Grue.VM
 import Text.Printf (printf)
@@ -28,15 +29,22 @@ type Scrollback = [Text]
 scrollbackLimit :: Int
 scrollbackLimit = 500
 
+-- | Where the game transcript (output stream 2) goes.  The player is
+-- asked for a file name the first time the story turns the transcript
+-- on, and only once per session.
+data ScriptFile = NotAsked | Declined | ScriptTo FilePath
+
 play :: BS.ByteString -> IO ()
 play story =
-  (CursesHelper.start >> loop [""] (boot story))
+  (CursesHelper.start >> loop NotAsked [""] (boot story))
     `finally` CursesHelper.end
 
-loop :: Scrollback -> VM -> IO ()
-loop buf vm0 = do
-  let (out, stop, vm) = run vm0
-  buf' <- addOutput vm buf out
+loop :: ScriptFile -> Scrollback -> VM -> IO ()
+loop script buf vm0 = do
+  let (out, stop, vm1) = run vm0
+      (scriptText, vm) = takeTranscript vm1
+  paged <- addOutput vm buf out
+  (script', buf') <- flushScript vm script paged scriptText
   case stop of
     Halted -> do
       let final = append buf' "\n[The story has ended. Press any key.]"
@@ -45,21 +53,49 @@ loop buf vm0 = do
       pure ()
     NeedInput -> do
       line <- editLine vm buf'
-      loop (append buf' (line <> "\n")) (provideInput line vm)
+      loop script' (append buf' (line <> "\n")) (provideInput line vm)
     SaveRequested bytes -> do
       let prompt = append buf' "Save to file: "
       name <- editLine vm prompt
       let buf'' = append prompt (name <> "\n")
       written <- try (BS.writeFile (T.unpack (T.strip name)) bytes)
       let ok = either (\e -> const False (e :: IOException)) (const True) written
-      loop buf'' (finishSave ok vm)
+      loop script' buf'' (finishSave ok vm)
     RestoreRequested -> do
       let prompt = append buf' "Restore from file: "
       name <- editLine vm prompt
       let buf'' = append prompt (name <> "\n")
       readBack <- try (BS.readFile (T.unpack (T.strip name)))
       let bytes = either (\e -> const Nothing (e :: IOException)) Just readBack
-      loop buf'' (finishRestore bytes vm)
+      loop script' buf'' (finishRestore bytes vm)
+
+-- | Write transcript text to its file, asking for the file name on
+-- first use.  An empty name or a write failure turns the transcript
+-- file off for the rest of the session.
+flushScript :: VM -> ScriptFile -> Scrollback -> Text -> IO (ScriptFile, Scrollback)
+flushScript vm script buf t
+  | T.null t = pure (script, buf)
+  | otherwise = case script of
+      Declined -> pure (Declined, buf)
+      ScriptTo path -> do
+        script' <- writeOrDecline path (TIO.appendFile path t)
+        pure (script', buf)
+      NotAsked -> do
+        let prompt = append buf "Script to file: "
+        name <- editLine vm prompt
+        let buf' = append prompt (name <> "\n")
+            path = T.unpack (T.strip name)
+        if null path
+          then pure (Declined, buf')
+          else do
+            script' <- writeOrDecline path (TIO.writeFile path t)
+            pure (script', buf')
+  where
+    writeOrDecline path write = do
+      written <- try write
+      pure $ case written of
+        Left e -> const Declined (e :: IOException)
+        Right () -> ScriptTo path
 
 -- | Add output text to the scrollback, splitting at new-lines.
 append :: Scrollback -> Text -> Scrollback

@@ -145,16 +145,18 @@ signed = fromIntegral . fromIntegral @Word16 @Int16
 unsigned :: Int -> Word16
 unsigned = fromIntegral
 
--- | Emit text: to the selected window normally, or into the story's
--- memory table while a stream 3 redirection is active (each character
--- lands as a ZSCII byte, new-lines as code 13).
+-- | Emit text: to the selected window normally (lower-window text
+-- also reaches any running transcript), or into the story's memory
+-- table while a stream 3 redirection is active (each character lands
+-- as a ZSCII byte, new-lines as code 13).
 output :: Text -> Z ()
 output t = do
   vm <- get
   case vmTables vm of
     []
       | vmWindow vm == 1 -> put (writeUpper t vm)
-      | otherwise -> put (emit t vm)
+      | otherwise ->
+          put (emit t (if transcriptOn vm then emitTranscript t vm else vm))
     (table, count) : rest -> do
       let codes = mapMaybe charToZscii (T.unpack t)
           place i code = pokeByte (table + 2 + count + i) (fromIntegral code)
@@ -359,8 +361,10 @@ exec (Instruction op operands st br text) = case op of
   OutputStream -> continue $ do
     vals <- values operands
     case map signed vals of
+      (2 : _) -> modify (setTranscript True)
       (3 : table : _) -> modify $ \vm ->
         vm {vmTables = (table, 0) : vmTables vm}
+      (-2) : _ -> modify (setTranscript False)
       (-3) : _ -> modify closeTable
       _ -> pure ()
   InputStream -> continue (void (values operands))
@@ -463,6 +467,7 @@ finishRestore mbytes vm = case vmPending vm of
               { vmPC = after
               , vmMemory = pokeWord 0x10 flags2 (vmMemory fresh)
               , vmOutput = vmOutput vm
+              , vmTranscript = vmTranscript vm
               , vmRng = vmRng vm
               }
   _ -> error "Grue.Interp.finishRestore: no restore is pending"
@@ -478,23 +483,33 @@ closeTable vm = case vmTables vm of
       , vmTables = rest
       }
 
--- | Start the story over, as the @restart@ opcode requires.  Only the
--- random generator survives.
+-- | Start the story over, as the @restart@ opcode requires.  Flags 2
+-- is preserved, as the standard demands (so a running transcript
+-- keeps going); the random generator and unflushed output also
+-- survive.
 restart :: VM -> VM
 restart vm =
-  (boot (originalBytes (vmMemory vm)))
-    { vmRng = vmRng vm
+  fresh
+    { vmMemory = pokeWord 0x10 (peekWord (vmMemory vm) 0x10) (vmMemory fresh)
+    , vmRng = vmRng vm
     , vmOutput = vmOutput vm
+    , vmTranscript = vmTranscript vm
     }
+  where
+    fresh = boot (originalBytes (vmMemory vm))
 
 -- | Complete a pending @read@: store the typed line in the text
 -- buffer, tokenize it against the standard dictionary, and fill the
--- parse buffer.  The machine is left ready to 'run' again.
+-- parse buffer.  The machine is left ready to 'run' again.  A running
+-- transcript receives the input line, as the standard requires.
 provideInput :: Text -> VM -> VM
 provideInput input vm = case vmPending vm of
   Just (PendingRead tbuf pbuf) ->
-    vm {vmMemory = written, vmPending = Nothing}
+    echoed {vmMemory = written, vmPending = Nothing}
     where
+      echoed
+        | transcriptOn vm = emitTranscript (input <> "\n") vm
+        | otherwise = vm
       mem = vmMemory vm
       hdr = vmHeader vm
       maxLetters = fromIntegral (peekByte mem tbuf)

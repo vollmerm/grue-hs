@@ -26,6 +26,12 @@ module Grue.VM
   , emit
   , takeOutput
 
+    -- * The transcript (output stream 2)
+  , transcriptOn
+  , setTranscript
+  , emitTranscript
+  , takeTranscript
+
     -- * The upper window
   , UpperWindow (..)
   , splitUpper
@@ -38,7 +44,7 @@ module Grue.VM
   , nextRandom
   ) where
 
-import Data.Bits (shiftR, xor, (.|.))
+import Data.Bits (clearBit, setBit, shiftR, testBit, xor, (.|.))
 import Data.ByteString (ByteString)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -105,6 +111,9 @@ data VM = VM
   , vmRng :: Rng
   , vmOutput :: [Text]
     -- ^ Buffered output, most recent chunk first.
+  , vmTranscript :: [Text]
+    -- ^ Buffered game-transcript text (output stream 2), most recent
+    -- chunk first, for the frontend to write somewhere durable.
   , vmWindow :: Int
     -- ^ The window receiving output: 0 for the scrolling lower
     -- window, 1 for the upper.
@@ -128,6 +137,7 @@ boot story =
     , vmFrames = baseFrame :| []
     , vmRng = seededRng 0x2a
     , vmOutput = []
+    , vmTranscript = []
     , vmWindow = 0
     , vmUpper = UpperWindow 0 (0, 0) Seq.empty
     , vmTables = []
@@ -212,6 +222,28 @@ emit t vm = vm {vmOutput = t : vmOutput vm}
 -- | Remove and return all buffered output, oldest first.
 takeOutput :: VM -> (Text, VM)
 takeOutput vm = (T.concat (reverse (vmOutput vm)), vm {vmOutput = []})
+
+-- | Whether the game transcript (output stream 2) is running: bit 0
+-- of Flags 2, which the story may also set or clear directly.
+transcriptOn :: VM -> Bool
+transcriptOn vm = testBit (peekWord (vmMemory vm) 0x10) 0
+
+-- | Turn the game transcript on or off.  The standard requires the
+-- @output_stream@ opcode to keep this Flags 2 bit in step.
+setTranscript :: Bool -> VM -> VM
+setTranscript on vm =
+  vm {vmMemory = pokeWord 0x10 (adjust (peekWord (vmMemory vm) 0x10)) (vmMemory vm)}
+  where
+    adjust = if on then (`setBit` 0) else (`clearBit` 0)
+
+-- | Append a chunk of transcript text.
+emitTranscript :: Text -> VM -> VM
+emitTranscript t vm = vm {vmTranscript = t : vmTranscript vm}
+
+-- | Remove and return all buffered transcript text, oldest first.
+takeTranscript :: VM -> (Text, VM)
+takeTranscript vm =
+  (T.concat (reverse (vmTranscript vm)), vm {vmTranscript = []})
 
 -- | Give the upper window a new height.  In version 3 a screen split
 -- always clears the upper window to blanks.
