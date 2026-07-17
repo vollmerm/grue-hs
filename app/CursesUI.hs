@@ -218,7 +218,12 @@ drawStatus cols status = do
       ScoreMoves score moves ->
         printf "Score: %d  Moves: %d " score moves
       HoursMins hours mins ->
-        printf "Time: %d:%02d " hours mins
+        let (hour, half)
+              | hours == 0 = (12 :: Int, "am")
+              | hours < 12 = (hours, "am")
+              | hours == 12 = (12, "pm")
+              | otherwise = (hours - 12, "pm")
+         in printf "Time: %d:%02d %s " hour mins (half :: String)
     gap = cols - T.length left - T.length right
     line
       | gap >= 1 = left <> T.replicate gap " " <> right
