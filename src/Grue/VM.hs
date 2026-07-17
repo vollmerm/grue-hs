@@ -38,6 +38,10 @@ module Grue.VM
   , selectWindow
   , writeUpper
 
+    -- * Sound
+  , emitBeep
+  , takeBeeps
+
     -- * Random numbers
   , Rng (..)
   , seededRng
@@ -118,6 +122,8 @@ data VM = VM
     -- ^ The window receiving output: 0 for the scrolling lower
     -- window, 1 for the upper.
   , vmUpper :: UpperWindow
+  , vmBeeps :: Int
+    -- ^ Bleeps requested by @sound_effect@ and not yet sounded.
   , vmTables :: [(Int, Int)]
     -- ^ Active memory output streams (stream 3), innermost first:
     -- the table's byte address and the number of characters written
@@ -140,6 +146,7 @@ boot story =
     , vmTranscript = []
     , vmWindow = 0
     , vmUpper = UpperWindow 0 (0, 0) Seq.empty
+    , vmBeeps = 0
     , vmTables = []
     , vmPending = Nothing
     }
@@ -282,6 +289,14 @@ writeUpper t vm = vm {vmUpper = go (vmUpper vm) t}
         place line =
           let padded = line <> T.replicate (col - T.length line) (T.singleton ' ')
            in T.take col padded <> chunk <> T.drop (col + T.length chunk) padded
+
+-- | Ask the frontend for a bleep.
+emitBeep :: VM -> VM
+emitBeep vm = vm {vmBeeps = vmBeeps vm + 1}
+
+-- | Remove and return the number of pending bleeps.
+takeBeeps :: VM -> (Int, VM)
+takeBeeps vm = (vmBeeps vm, vm {vmBeeps = 0})
 
 -- | A small splitmix-style pseudo-random number generator.  The
 -- Z-machine only needs uniform values in small ranges, and keeping the

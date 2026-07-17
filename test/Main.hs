@@ -687,6 +687,15 @@ interpTests =
               (out, stop, vm) = runProgVM prog
           (out, stop) @?= ("hi", Halted)
           fst (takeTranscript vm) @?= "hi"
+    , testCase "sound_effect bleeps reach the frontend" $ do
+        let prog =
+              [ 0xf5, 0x7f, 0x01 -- sound_effect 1 (high bleep)
+              , 0xf5, 0x7f, 0x02 -- sound_effect 2 (low bleep)
+              , 0xf5, 0x5f, 0x03, 0x00 -- sound_effect 3 0 (sampled, ignored)
+              , 0xba
+              ]
+            (_, _, vm) = runProgVM prog
+        fst (takeBeeps vm) @?= 2
     , testCase "input echoes into a running transcript" $ do
         let prog =
               [ 0xf3, 0x7f, 0x02 -- output_stream 2

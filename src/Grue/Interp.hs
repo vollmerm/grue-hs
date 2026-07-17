@@ -368,7 +368,11 @@ exec (Instruction op operands st br text) = case op of
       (-3) : _ -> modify closeTable
       _ -> pure ()
   InputStream -> continue (void (values operands))
-  SoundEffect -> continue (void (values operands))
+  SoundEffect -> continue $ do
+    vals <- values operands
+    case vals of
+      (n : _) | n > 2 -> pure () -- sampled sounds are not provided
+      _ -> modify emitBeep
   where
     continue act = Nothing <$ act
 
@@ -468,6 +472,7 @@ finishRestore mbytes vm = case vmPending vm of
               , vmMemory = pokeWord 0x10 flags2 (vmMemory fresh)
               , vmOutput = vmOutput vm
               , vmTranscript = vmTranscript vm
+              , vmBeeps = vmBeeps vm
               , vmRng = vmRng vm
               }
   _ -> error "Grue.Interp.finishRestore: no restore is pending"
@@ -494,6 +499,7 @@ restart vm =
     , vmRng = vmRng vm
     , vmOutput = vmOutput vm
     , vmTranscript = vmTranscript vm
+    , vmBeeps = vmBeeps vm
     }
   where
     fresh = boot (originalBytes (vmMemory vm))

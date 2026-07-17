@@ -9,7 +9,7 @@
 module CursesUI (play) where
 
 import Control.Exception (IOException, finally, try)
-import Control.Monad (zipWithM_)
+import Control.Monad (replicateM_, zipWithM_)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.Text (Text)
@@ -42,7 +42,9 @@ play story =
 loop :: ScriptFile -> Scrollback -> VM -> IO ()
 loop script buf vm0 = do
   let (out, stop, vm1) = run vm0
-      (scriptText, vm) = takeTranscript vm1
+      (scriptText, vm2) = takeTranscript vm1
+      (beeps, vm) = takeBeeps vm2
+  replicateM_ beeps Curses.beep
   paged <- addOutput vm buf out
   (script', buf') <- flushScript vm script paged scriptText
   case stop of
