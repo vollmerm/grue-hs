@@ -3,9 +3,11 @@
 -- | A full-screen curses interface.
 --
 -- The top row is the traditional version 3 status line (current room
--- on the left; score and turns, or the time, on the right).  The rest
+-- on the left; score and turns, or the time, on the right), followed
+-- by the story's upper window whenever the screen is split.  The rest
 -- of the screen scrolls story text, word-wrapped to the terminal
--- width, with line editing at the prompt.
+-- width, with line editing at the prompt and a [MORE] pause when more
+-- than a screenful arrives at once.
 module CursesUI (play) where
 
 import Control.Exception (IOException, finally, try)
