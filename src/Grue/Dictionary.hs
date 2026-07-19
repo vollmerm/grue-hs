@@ -15,6 +15,7 @@ module Grue.Dictionary
   , tokenize
   ) where
 
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word16)
@@ -50,7 +51,7 @@ readDictionary mem hdr =
     base = dictionaryAddr hdr
     n = fromIntegral (peekByte mem base)
     codes = [peekByte mem (base + 1 + i) | i <- [0 .. n - 1]]
-    seps = [c | code <- codes, Just c <- [zsciiToChar (fromIntegral code)]]
+    seps = mapMaybe (zsciiToChar . fromIntegral) codes
 
 -- | The byte address of a dictionary entry, by index.
 entryAddr :: Dictionary -> Int -> Int

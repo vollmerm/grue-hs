@@ -6,18 +6,13 @@
 -- interactive play.  No status line is shown.
 module Console (play) where
 
-import Control.Exception (IOException, try)
 import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Files
 import Grue.Interp
 import Grue.VM
 import System.IO (BufferMode (NoBuffering), hIsEOF, hSetBuffering, stdin, stdout)
-
--- | Where the game transcript (output stream 2) goes.  The player is
--- asked for a file name the first time the story turns the transcript
--- on, and only once per session.
-data ScriptFile = NotAsked | Declined | ScriptTo FilePath
 
 -- | Run the story, flushing output and feeding input until it halts.
 -- The transcript always ends with a newline, so a final prompt does
@@ -36,20 +31,18 @@ play story = do
             if T.null out then atLineStart else T.last out == '\n'
       case stop of
         Halted -> finish atLineStart'
-        NeedInput -> do
+        NeedInput ->
           withLine (finish atLineStart') $ \line ->
             loop atLineStart' script' (provideInput (T.strip line) vm'')
         SaveRequested bytes -> do
           putStr "Save to file: "
           withLine (loop True script' (finishSave False vm'')) $ \name -> do
-            written <- try (BS.writeFile (T.unpack (T.strip name)) bytes)
-            let ok = either (\e -> const False (e :: IOException)) (const True) written
+            ok <- writeSave name bytes
             loop True script' (finishSave ok vm'')
         RestoreRequested -> do
           putStr "Restore from file: "
           withLine (loop True script' (finishRestore Nothing vm'')) $ \name -> do
-            readBack <- try (BS.readFile (T.unpack (T.strip name)))
-            let bytes = either (\e -> const Nothing (e :: IOException)) Just readBack
+            bytes <- readSave name
             loop True script' (finishRestore bytes vm'')
     finish atLineStart =
       if atLineStart then pure () else putStrLn ""
@@ -65,7 +58,7 @@ flushScript script t
   | T.null t = pure script
   | otherwise = case script of
       Declined -> pure Declined
-      ScriptTo path -> writeOrDecline path (TIO.appendFile path t)
+      ScriptTo path -> appendScript path t
       NotAsked -> do
         putStr "Script to file: "
         eof <- hIsEOF stdin
@@ -73,13 +66,4 @@ flushScript script t
           then pure Declined
           else do
             name <- TIO.getLine
-            let path = T.unpack (T.strip name)
-            if null path
-              then pure Declined
-              else writeOrDecline path (TIO.writeFile path t)
-  where
-    writeOrDecline path write = do
-      written <- try write
-      pure $ case written of
-        Left e -> const Declined (e :: IOException)
-        Right () -> ScriptTo path
+            maybe (pure Declined) (`startScript` t) (scriptPath name)

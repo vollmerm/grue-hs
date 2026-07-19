@@ -19,8 +19,8 @@ module Grue.Header
   ) where
 
 import Data.ByteString qualified as BS
-import Grue.Memory
 import Data.Word (Word16)
+import Grue.Memory
 
 -- | Static header fields, captured once when a story is loaded.
 data Header = Header

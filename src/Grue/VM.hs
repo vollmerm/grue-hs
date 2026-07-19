@@ -43,7 +43,7 @@ module Grue.VM
   , takeBeeps
 
     -- * Random numbers
-  , Rng (..)
+  , Rng
   , seededRng
   , nextRandom
   ) where
@@ -82,9 +82,10 @@ data Frame = Frame
 -- can be reported to the story.
 data PendingInput
   = PendingRead
-      { pendingTextBuffer :: Int
-      , pendingParseBuffer :: Int
-      }
+      Int
+      -- ^ Byte address of the text buffer.
+      Int
+      -- ^ Byte address of the parse buffer.
   | PendingSave Branch
   | PendingRestore Branch
   deriving (Eq, Show)

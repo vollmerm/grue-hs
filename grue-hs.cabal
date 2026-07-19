@@ -37,6 +37,7 @@ executable grue-hs
     main-is:          Main.hs
     other-modules:    Console
                       CursesUI
+                      Files
     build-depends:    base ^>=4.20.0.0,
                       bytestring,
                       grue-hs,

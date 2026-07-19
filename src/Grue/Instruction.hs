@@ -349,7 +349,6 @@ decode mem hdr pc0 = (inst, pcText)
           _ -> (ByVariable (peekByte mem pc), pc + 1)
         (rest, end) = readOperands ts pc'
 
-
 -- | Read the one or two bytes of branch data at an address.  Returns
 -- the branch and the address just past it.  This is also used on
 -- restore, when execution resumes at the branch data of the original

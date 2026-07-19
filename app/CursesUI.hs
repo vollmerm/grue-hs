@@ -10,13 +10,13 @@
 -- than a screenful arrives at once.
 module CursesUI (play) where
 
-import Control.Exception (IOException, finally, try)
-import Control.Monad (replicateM_, zipWithM_)
+import Control.Exception (finally)
+import Control.Monad (replicateM_, void, zipWithM_)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
+import Files
 import Grue.Interp
 import Grue.VM
 import Text.Printf (printf)
@@ -30,11 +30,6 @@ type Scrollback = [Text]
 -- | How much scrollback to retain.
 scrollbackLimit :: Int
 scrollbackLimit = 500
-
--- | Where the game transcript (output stream 2) goes.  The player is
--- asked for a file name the first time the story turns the transcript
--- on, and only once per session.
-data ScriptFile = NotAsked | Declined | ScriptTo FilePath
 
 play :: BS.ByteString -> IO ()
 play story =
@@ -53,8 +48,7 @@ loop script buf vm0 = do
     Halted -> do
       let final = append buf' "\n[The story has ended. Press any key.]"
       render vm final ""
-      _ <- CursesHelper.getKey (render vm final "")
-      pure ()
+      void (CursesHelper.getKey (render vm final ""))
     NeedInput -> do
       line <- editLine vm buf'
       loop script' (append buf' (line <> "\n")) (provideInput line vm)
@@ -62,15 +56,13 @@ loop script buf vm0 = do
       let prompt = append buf' "Save to file: "
       name <- editLine vm prompt
       let buf'' = append prompt (name <> "\n")
-      written <- try (BS.writeFile (T.unpack (T.strip name)) bytes)
-      let ok = either (\e -> const False (e :: IOException)) (const True) written
+      ok <- writeSave name bytes
       loop script' buf'' (finishSave ok vm)
     RestoreRequested -> do
       let prompt = append buf' "Restore from file: "
       name <- editLine vm prompt
       let buf'' = append prompt (name <> "\n")
-      readBack <- try (BS.readFile (T.unpack (T.strip name)))
-      let bytes = either (\e -> const Nothing (e :: IOException)) Just readBack
+      bytes <- readSave name
       loop script' buf'' (finishRestore bytes vm)
 
 -- | Write transcript text to its file, asking for the file name on
@@ -82,24 +74,14 @@ flushScript vm script buf t
   | otherwise = case script of
       Declined -> pure (Declined, buf)
       ScriptTo path -> do
-        script' <- writeOrDecline path (TIO.appendFile path t)
+        script' <- appendScript path t
         pure (script', buf)
       NotAsked -> do
         let prompt = append buf "Script to file: "
         name <- editLine vm prompt
         let buf' = append prompt (name <> "\n")
-            path = T.unpack (T.strip name)
-        if null path
-          then pure (Declined, buf')
-          else do
-            script' <- writeOrDecline path (TIO.writeFile path t)
-            pure (script', buf')
-  where
-    writeOrDecline path write = do
-      written <- try write
-      pure $ case written of
-        Left e -> const Declined (e :: IOException)
-        Right () -> ScriptTo path
+        script' <- maybe (pure Declined) (`startScript` t) (scriptPath name)
+        pure (script', buf')
 
 -- | Add output text to the scrollback, splitting at new-lines.
 append :: Scrollback -> Text -> Scrollback
@@ -133,13 +115,8 @@ addOutput vm buf out = do
       reveal k = do
         Curses.erase
         _ <- drawTop vm cols
-        zipWithM_
-          (\r line -> Curses.mvWAddStr Curses.stdScr r 0 (T.unpack line))
-          [top ..]
-          (lastN pageRows (take k allRows))
-        Curses.wAttrSet Curses.stdScr (Curses.setReverse Curses.attr0 True, Curses.Pair 0)
-        Curses.mvWAddStr Curses.stdScr (rows - 1) 0 "[MORE]"
-        Curses.wAttrSet Curses.stdScr (Curses.attr0, Curses.Pair 0)
+        drawLines top (lastN pageRows (take k allRows))
+        inReverse (Curses.mvWAddStr Curses.stdScr (rows - 1) 0 "[MORE]")
         Curses.refresh
       page k
         | total - k <= textRows = pure buf'
@@ -178,10 +155,7 @@ render vm buf input = do
       textRows = max 1 (rows - top)
       wrapped = concatMap (wrapLine width) (reverse (withInput buf))
       visible = lastN textRows wrapped
-  zipWithM_
-    (\r line -> Curses.mvWAddStr Curses.stdScr r 0 (T.unpack line))
-    [top ..]
-    visible
+  drawLines top visible
   let cursorRow = top + length visible - 1
       cursorCol = maybe 0 T.length (lastMaybe visible)
   Curses.wMove Curses.stdScr (max top cursorRow) (min (cols - 1) cursorCol)
@@ -197,12 +171,22 @@ render vm buf input = do
 drawTop :: VM -> Int -> IO Int
 drawTop vm cols = do
   drawStatus cols (statusLine vm)
-  zipWithM_
-    (\r line ->
-       Curses.mvWAddStr Curses.stdScr r 0 (T.unpack (T.take (cols - 1) line)))
-    [1 ..]
-    (toList (upperLines (vmUpper vm)))
+  drawLines 1 (map (T.take (cols - 1)) (toList (upperLines (vmUpper vm))))
   pure (1 + upperHeight (vmUpper vm))
+
+-- | Draw lines of text down the screen from a starting row.
+drawLines :: Int -> [Text] -> IO ()
+drawLines top =
+  zipWithM_
+    (\r line -> Curses.mvWAddStr Curses.stdScr r 0 (T.unpack line))
+    [top ..]
+
+-- | Run a drawing action with reverse video switched on.
+inReverse :: IO () -> IO ()
+inReverse draw = do
+  Curses.wAttrSet Curses.stdScr (Curses.setReverse Curses.attr0 True, Curses.Pair 0)
+  draw
+  Curses.wAttrSet Curses.stdScr (Curses.attr0, Curses.Pair 0)
 
 -- | The last @n@ elements of a list.
 lastN :: Int -> [a] -> [a]
@@ -210,10 +194,8 @@ lastN n xs = drop (max 0 (length xs - n)) xs
 
 -- | Draw the reverse-video status bar on the top row.
 drawStatus :: Int -> StatusLine -> IO ()
-drawStatus cols status = do
-  Curses.wAttrSet Curses.stdScr (Curses.setReverse Curses.attr0 True, Curses.Pair 0)
-  Curses.mvWAddStr Curses.stdScr 0 0 (T.unpack line)
-  Curses.wAttrSet Curses.stdScr (Curses.attr0, Curses.Pair 0)
+drawStatus cols status =
+  inReverse (Curses.mvWAddStr Curses.stdScr 0 0 (T.unpack line))
   where
     left = " " <> statusRoom status
     right = T.pack $ case statusRight status of

@@ -25,9 +25,9 @@ import Data.Bits (complement, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.Char (toLower)
 import Data.Int (Int16)
-import Data.Maybe (fromMaybe, mapMaybe)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -142,6 +142,7 @@ callRoutine packed args st = do
 signed :: Word16 -> Int
 signed = fromIntegral . fromIntegral @Word16 @Int16
 
+-- | Truncate a signed value back to a machine word.
 unsigned :: Int -> Word16
 unsigned = fromIntegral
 
@@ -210,18 +211,14 @@ exec (Instruction op operands st br text) = case op of
     storeTo st v
   Inc -> continue $ do
     ref <- val1
-    _ <- adjustVar ref (+ 1)
-    pure ()
+    void (adjustVar ref (+ 1))
   Dec -> continue $ do
     ref <- val1
-    _ <- adjustVar ref (subtract 1)
-    pure ()
+    void (adjustVar ref (subtract 1))
   Push -> continue $ do
     v <- val1
     modify (pushEval v)
-  Pop -> continue $ do
-    _ <- state popEval
-    pure ()
+  Pop -> continue (void (state popEval))
   Pull -> continue $ do
     ref <- val1
     v <- state popEval
@@ -530,7 +527,7 @@ provideInput input vm = case vmPending vm of
       dict = readDictionary mem hdr
       tokens = take (fromIntegral (peekByte mem pbuf)) (tokenize dict line)
       entry i (pos, word) m =
-        ( pokeWord (base) (fromIntegral dictAddr)
+        ( pokeWord base (fromIntegral dictAddr)
             . pokeByte (base + 2) (fromIntegral (T.length word))
             . pokeByte (base + 3) (fromIntegral (pos + 1))
         )

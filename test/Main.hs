@@ -742,99 +742,99 @@ storyTests stories =
     storyTest story =
       testGroup (storyPath story) (basicTests ++ saveTests)
       where
-       spec = storySpec story
-       mem = storyMemory story
-       known = specKnownObjects spec
-       intro = specIntro spec
-       basicTests =
-        [ testCase "is version 3" $
-            zVersion (readHeader mem) @?= 3
-        , testCase "declared length fits the file" $
-            assertBool "file length exceeds actual size" $
-              fileLength (readHeader mem) <= memorySize mem
-        , testCase "checksum verifies" $
-            assertBool "checksum mismatch" $
-              checksumValid mem (readHeader mem)
-        , testCase "dictionary words all look up" $ do
-            let hdr = readHeader mem
-                dict = readDictionary mem hdr
-                words' = allWords mem hdr dict
-            assertBool "suspiciously small dictionary" $
-              dictEntryCount dict >= specMinWords spec
-            -- Entries containing spaces are legal but deliberately
-            -- unmatchable (their padding differs from typed input), so
-            -- only space-free words are expected to round-trip.
-            let misses =
-                  [ w
-                  | w <- words'
-                  , not (T.any (== ' ') w)
-                  , isNothing (lookupWord mem hdr dict w)
-                  ]
-            take 5 misses @?= []
-        , testCase "object tree is well-founded" $ do
-            let hdr = readHeader mem
-                count = Obj.objectCount mem hdr
-                childrenOf o =
-                  takeWhile (/= 0) $
-                    iterate (Obj.sibling mem hdr) (Obj.child mem hdr o)
-                wellPlaced o =
-                  Obj.parent mem hdr o == 0
-                    || o `elem` childrenOf (Obj.parent mem hdr o)
-            assertBool
-              "suspiciously few objects"
-              (count >= specMinObjects spec)
-            assertBool "orphaned object" (all wellPlaced [1 .. count])
-        , testCase "known object names appear" $ do
-            let hdr = readHeader mem
-                count = Obj.objectCount mem hdr
-                names = map (Obj.shortName mem hdr) [1 .. count]
-            sequence_
-              [ assertBool (T.unpack name ++ " missing") (name `elem` names)
-              | name <- known
+        spec = storySpec story
+        mem = storyMemory story
+        known = specKnownObjects spec
+        intro = specIntro spec
+        basicTests =
+          [ testCase "is version 3" $
+              zVersion (readHeader mem) @?= 3
+          , testCase "declared length fits the file" $
+              assertBool "file length exceeds actual size" $
+                fileLength (readHeader mem) <= memorySize mem
+          , testCase "checksum verifies" $
+              assertBool "checksum mismatch" $
+                checksumValid mem (readHeader mem)
+          , testCase "dictionary words all look up" $ do
+              let hdr = readHeader mem
+                  dict = readDictionary mem hdr
+                  words' = allWords mem hdr dict
+              assertBool "suspiciously small dictionary" $
+                dictEntryCount dict >= specMinWords spec
+              -- Entries containing spaces are legal but deliberately
+              -- unmatchable (their padding differs from typed input), so
+              -- only space-free words are expected to round-trip.
+              let misses =
+                    [ w
+                    | w <- words'
+                    , not (T.any (== ' ') w)
+                    , isNothing (lookupWord mem hdr dict w)
+                    ]
+              take 5 misses @?= []
+          , testCase "object tree is well-founded" $ do
+              let hdr = readHeader mem
+                  count = Obj.objectCount mem hdr
+                  childrenOf o =
+                    takeWhile (/= 0) $
+                      iterate (Obj.sibling mem hdr) (Obj.child mem hdr o)
+                  wellPlaced o =
+                    Obj.parent mem hdr o == 0
+                      || o `elem` childrenOf (Obj.parent mem hdr o)
+              assertBool
+                "suspiciously few objects"
+                (count >= specMinObjects spec)
+              assertBool "orphaned object" (all wellPlaced [1 .. count])
+          , testCase "known object names appear" $ do
+              let hdr = readHeader mem
+                  count = Obj.objectCount mem hdr
+                  names = map (Obj.shortName mem hdr) [1 .. count]
+              sequence_
+                [ assertBool (T.unpack name ++ " missing") (name `elem` names)
+                | name <- known
+                ]
+          , testCase "boots and runs to the first prompt" $ do
+              let (out, stop, _) = run (boot (originalBytes mem))
+              stop @?= NeedInput
+              assertBool "no output before the prompt" (not (T.null out))
+              sequence_
+                [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)
+                | s <- intro
+                ]
+          ]
+        -- Stories that open with a yes/no question (rather than a
+        -- normal prompt) would misread these scripted commands.
+        saveTests
+          | null intro = []
+          | otherwise =
+              [ testCase "a saved game restores in a fresh machine" $ do
+                  -- Play a move, save, and capture the Quetzal bytes.
+                  let (_, _, vm1) = run (boot (originalBytes mem))
+                      (_, s2, vm3) = run (provideInput "north" vm1)
+                  s2 @?= NeedInput
+                  let (_, s3, vm5) = run (provideInput "save" vm3)
+                  bytes <- case s3 of
+                    SaveRequested b -> pure b
+                    other -> assertFailure ("expected a save request: " ++ show other)
+                  -- Continue after a successful save...
+                  let (outA, sA, vmA) = run (finishSave True vm5)
+                  -- ...and separately, restore the bytes in a fresh machine.
+                  let (_, _, f1) = run (boot (originalBytes mem))
+                      (_, sR, f3) = run (provideInput "restore" f1)
+                  sR @?= RestoreRequested
+                  let (outB, sB, vmB) = run (finishRestore (Just bytes) f3)
+                  (outB, sB) @?= (outA, sA)
+                  vmPC vmB @?= vmPC vmA
+                  vmFrames vmB @?= vmFrames vmA
+                  let dynamic vm =
+                        [ peekByte (vmMemory vm) i
+                        | i <- [0x40 .. staticBase (vmHeader vm) - 1]
+                        ]
+                  dynamic vmB @?= dynamic vmA
+              , testCase "restoring garbage reports failure to the story" $ do
+                  let (_, _, vm1) = run (boot (originalBytes mem))
+                      (_, sR, vm2) = run (provideInput "restore" vm1)
+                  sR @?= RestoreRequested
+                  let (out, stop, _) = run (finishRestore (Just "not a save") vm2)
+                  stop @?= NeedInput
+                  assertBool "story kept running" (not (T.null out))
               ]
-        , testCase "boots and runs to the first prompt" $ do
-            let (out, stop, _) = run (boot (originalBytes mem))
-            stop @?= NeedInput
-            assertBool "no output before the prompt" (not (T.null out))
-            sequence_
-              [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)
-              | s <- intro
-              ]
-        ]
-       -- Stories that open with a yes/no question (rather than a
-       -- normal prompt) would misread these scripted commands.
-       saveTests
-        | null intro = []
-        | otherwise =
-        [ testCase "a saved game restores in a fresh machine" $ do
-            -- Play a move, save, and capture the Quetzal bytes.
-            let (_, _, vm1) = run (boot (originalBytes mem))
-                (_, s2, vm3) = run (provideInput "north" vm1)
-            s2 @?= NeedInput
-            let (_, s3, vm5) = run (provideInput "save" vm3)
-            bytes <- case s3 of
-              SaveRequested b -> pure b
-              other -> assertFailure ("expected a save request: " ++ show other)
-            -- Continue after a successful save...
-            let (outA, sA, vmA) = run (finishSave True vm5)
-            -- ...and separately, restore the bytes in a fresh machine.
-            let (_, _, f1) = run (boot (originalBytes mem))
-                (_, sR, f3) = run (provideInput "restore" f1)
-            sR @?= RestoreRequested
-            let (outB, sB, vmB) = run (finishRestore (Just bytes) f3)
-            (outB, sB) @?= (outA, sA)
-            vmPC vmB @?= vmPC vmA
-            vmFrames vmB @?= vmFrames vmA
-            let dynamic vm =
-                  [ peekByte (vmMemory vm) i
-                  | i <- [0x40 .. staticBase (vmHeader vm) - 1]
-                  ]
-            dynamic vmB @?= dynamic vmA
-        , testCase "restoring garbage reports failure to the story" $ do
-            let (_, _, vm1) = run (boot (originalBytes mem))
-                (_, sR, vm2) = run (provideInput "restore" vm1)
-            sR @?= RestoreRequested
-            let (out, stop, _) = run (finishRestore (Just "not a save") vm2)
-            stop @?= NeedInput
-            assertBool "story kept running" (not (T.null out))
-        ]

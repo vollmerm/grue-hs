@@ -45,14 +45,11 @@ restoreState story save = do
       base = boot story
       mem0 = vmMemory base
   ifhdBytes <- require "IFhd" sections
-  memBytes <- maybe (require "UMem" sections) Right (lookup "CMem" sections)
-  stksBytes <- require "Stks" sections
   checkStory story ifhdBytes
-  mem <-
-    if "CMem" `elem` map fst sections
-      then applyCMem mem0 (vmHeader base) memBytes
-      else applyUMem mem0 (vmHeader base) memBytes
-  frames <- parseFrames stksBytes
+  mem <- case lookup "CMem" sections of
+    Just bytes -> applyCMem mem0 (vmHeader base) bytes
+    Nothing -> applyUMem mem0 (vmHeader base) =<< require "UMem" sections
+  frames <- parseFrames =<< require "Stks" sections
   ordered <-
     maybe (Left "Quetzal: no stack frames") Right (nonEmpty (reverse frames))
   pure
@@ -146,6 +143,9 @@ applyUMem mem0 hdr bytes
 stks :: VM -> ByteString
 stks vm = BS.concat (map frameBytes (reverse (NE.toList (vmFrames vm))))
 
+-- | One call frame in the Stks layout: return address, local count,
+-- store variable, argument mask, evaluation stack depth, then the
+-- locals and the pushed values.
 frameBytes :: Frame -> ByteString
 frameBytes f =
   BS.pack $
