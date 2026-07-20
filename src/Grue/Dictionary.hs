@@ -26,14 +26,14 @@ import Grue.ZString
 -- | The layout of a dictionary table, read from its short header.
 data Dictionary = Dictionary
   { dictSeparators :: [Char]
-    -- ^ Word-separator characters.  Each separator both divides words
-    -- and counts as a word in its own right.
+  -- ^ Word-separator characters.  Each separator both divides words
+  -- and counts as a word in its own right.
   , dictEntryLength :: Int
-    -- ^ Length in bytes of one entry, encoded text plus data.
+  -- ^ Length in bytes of one entry, encoded text plus data.
   , dictEntryCount :: Int
-    -- ^ Number of entries.
+  -- ^ Number of entries.
   , dictEntriesAddr :: Int
-    -- ^ Byte address of the first entry.
+  -- ^ Byte address of the first entry.
   }
   deriving (Eq, Show)
 

@@ -64,15 +64,15 @@ import Grue.Memory
 -- | One routine activation.
 data Frame = Frame
   { frameLocals :: Seq Word16
-    -- ^ The routine's local variables (up to 15).
+  -- ^ The routine's local variables (up to 15).
   , frameEval :: [Word16]
-    -- ^ This routine's portion of the evaluation stack, topmost first.
+  -- ^ This routine's portion of the evaluation stack, topmost first.
   , frameReturnPC :: Int
-    -- ^ Where execution resumes after this routine returns.
+  -- ^ Where execution resumes after this routine returns.
   , frameStore :: Word8
-    -- ^ The variable that receives this routine's return value.
+  -- ^ The variable that receives this routine's return value.
   , frameArgs :: Int
-    -- ^ How many arguments the call supplied, recorded for save files.
+  -- ^ How many arguments the call supplied, recorded for save files.
   }
   deriving (Eq, Show)
 
@@ -82,10 +82,10 @@ data Frame = Frame
 -- can be reported to the story.
 data PendingInput
   = PendingRead
+      -- | Byte address of the text buffer.
       Int
-      -- ^ Byte address of the text buffer.
+      -- | Byte address of the parse buffer.
       Int
-      -- ^ Byte address of the parse buffer.
   | PendingSave Branch
   | PendingRestore Branch
   deriving (Eq, Show)
@@ -96,12 +96,12 @@ data PendingInput
 -- window never scrolls.
 data UpperWindow = UpperWindow
   { upperHeight :: Int
-    -- ^ How many screen rows the window occupies.
+  -- ^ How many screen rows the window occupies.
   , upperCursor :: (Int, Int)
-    -- ^ Where the next character lands: row and column, zero-based.
+  -- ^ Where the next character lands: row and column, zero-based.
   , upperLines :: Seq Text
-    -- ^ The window's rows, exactly 'upperHeight' of them, stored
-    -- unpadded: columns beyond a line's end are blank.
+  -- ^ The window's rows, exactly 'upperHeight' of them, stored
+  -- unpadded: columns beyond a line's end are blank.
   }
   deriving (Eq, Show)
 
@@ -111,25 +111,25 @@ data VM = VM
   , vmHeader :: Header
   , vmPC :: Int
   , vmFrames :: NonEmpty Frame
-    -- ^ Call frames, current routine first.  The base frame is the
-    -- story's top-level execution, which never returns.
+  -- ^ Call frames, current routine first.  The base frame is the
+  -- story's top-level execution, which never returns.
   , vmRng :: Rng
   , vmOutput :: [Text]
-    -- ^ Buffered output, most recent chunk first.
+  -- ^ Buffered output, most recent chunk first.
   , vmTranscript :: [Text]
-    -- ^ Buffered game-transcript text (output stream 2), most recent
-    -- chunk first, for the frontend to write somewhere durable.
+  -- ^ Buffered game-transcript text (output stream 2), most recent
+  -- chunk first, for the frontend to write somewhere durable.
   , vmWindow :: Int
-    -- ^ The window receiving output: 0 for the scrolling lower
-    -- window, 1 for the upper.
+  -- ^ The window receiving output: 0 for the scrolling lower
+  -- window, 1 for the upper.
   , vmUpper :: UpperWindow
   , vmBeeps :: Int
-    -- ^ Bleeps requested by @sound_effect@ and not yet sounded.
+  -- ^ Bleeps requested by @sound_effect@ and not yet sounded.
   , vmTables :: [(Int, Int)]
-    -- ^ Active memory output streams (stream 3), innermost first:
-    -- the table's byte address and the number of characters written
-    -- so far.  While any is active, output goes there instead of the
-    -- screen.
+  -- ^ Active memory output streams (stream 3), innermost first:
+  -- the table's byte address and the number of characters written
+  -- so far.  While any is active, output goes there instead of the
+  -- screen.
   , vmPending :: Maybe PendingInput
   }
   deriving (Eq, Show)

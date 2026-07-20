@@ -359,9 +359,10 @@ decodeBranch mem pc
   | otherwise = (branchFrom (pc + 2) offset14, pc + 2)
   where
     b1 = peekByte mem pc
+    raw :: Int
     raw =
       (fromIntegral (b1 .&. 63) `shiftL` 8)
-        .|. fromIntegral (peekByte mem (pc + 1)) :: Int
+        .|. fromIntegral (peekByte mem (pc + 1))
     offset14 = if raw >= 0x2000 then raw - 0x4000 else raw
     branchFrom after offset =
       Branch

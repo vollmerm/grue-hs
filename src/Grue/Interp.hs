@@ -43,17 +43,17 @@ import Grue.ZString
 
 -- | Why execution paused.
 data Stop
-  = NeedInput
-    -- ^ The @read@ opcode wants a line of input; resume with
+  = -- | The @read@ opcode wants a line of input; resume with
     -- 'provideInput' followed by 'run'.
-  | SaveRequested ByteString
-    -- ^ The story wants these bytes written somewhere durable; report
+    NeedInput
+  | -- | The story wants these bytes written somewhere durable; report
     -- the outcome with 'finishSave' and 'run' again.
-  | RestoreRequested
-    -- ^ The story wants a previously saved game back; supply the file
+    SaveRequested ByteString
+  | -- | The story wants a previously saved game back; supply the file
     -- with 'finishRestore' and 'run' again.
-  | Halted
-    -- ^ The story has ended.
+    RestoreRequested
+  | -- | The story has ended.
+    Halted
   deriving (Eq, Show)
 
 -- | A computation over machine state.
@@ -294,8 +294,9 @@ exec (Instruction op operands st br text) = case op of
     output t
   PrintPaddr -> continue $ do
     paddr <- val1
-    t <- withWorld
-      (\mem hdr -> decodeStringAt mem hdr (packedToByte hdr paddr))
+    t <-
+      withWorld
+        (\mem hdr -> decodeStringAt mem hdr (packedToByte hdr paddr))
     output t
   PrintObj -> continue $ do
     o <- val1
@@ -336,8 +337,9 @@ exec (Instruction op operands st br text) = case op of
       vm {vmPending = Just (PendingRead (fromIntegral tbuf) (fromIntegral pbuf))}
     pure (Just NeedInput)
   -- The wider world
-  Verify -> branch0 $
-    gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
+  Verify ->
+    branch0 $
+      gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
   Quit -> pure (Just Halted)
   Restart -> continue $ modify restart
   Save -> case br of
@@ -544,8 +546,8 @@ provideInput input vm = case vmPending vm of
 -- | What the status line should currently show.
 data StatusLine = StatusLine
   { statusRoom :: Text
-    -- ^ The short name of the object in the first global variable,
-    -- conventionally the current room.
+  -- ^ The short name of the object in the first global variable,
+  -- conventionally the current room.
   , statusRight :: RightStatus
   }
   deriving (Eq, Show)

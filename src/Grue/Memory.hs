@@ -36,10 +36,10 @@ import Data.Word (Word16, Word8)
 -- | The addressable memory of a running story.
 data Memory = Memory
   { memStory :: !ByteString
-    -- ^ The story file as loaded, never modified.
+  -- ^ The story file as loaded, never modified.
   , memWrites :: !(IntMap Word8)
-    -- ^ Bytes written since load, keyed by address.  A read consults
-    -- this overlay first and falls back to the story bytes.
+  -- ^ Bytes written since load, keyed by address.  A read consults
+  -- this overlay first and falls back to the story bytes.
   }
   deriving (Eq, Show)
 

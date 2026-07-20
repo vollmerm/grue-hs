@@ -25,26 +25,26 @@ import Grue.Memory
 -- | Static header fields, captured once when a story is loaded.
 data Header = Header
   { zVersion :: !Int
-    -- ^ Z-machine version number, 1 to 8.
+  -- ^ Z-machine version number, 1 to 8.
   , highMemBase :: !Int
-    -- ^ Byte address of the base of high memory.
+  -- ^ Byte address of the base of high memory.
   , initialPC :: !Int
-    -- ^ Initial program counter (byte address, versions 1 to 5).
+  -- ^ Initial program counter (byte address, versions 1 to 5).
   , dictionaryAddr :: !Int
-    -- ^ Byte address of the dictionary.
+  -- ^ Byte address of the dictionary.
   , objectTableAddr :: !Int
-    -- ^ Byte address of the object table.
+  -- ^ Byte address of the object table.
   , globalsAddr :: !Int
-    -- ^ Byte address of the global variables table.
+  -- ^ Byte address of the global variables table.
   , staticBase :: !Int
-    -- ^ Byte address of the base of static memory.  Addresses below
-    -- this are dynamic memory, which the game may write to.
+  -- ^ Byte address of the base of static memory.  Addresses below
+  -- this are dynamic memory, which the game may write to.
   , abbreviationsAddr :: !Int
-    -- ^ Byte address of the abbreviations table.
+  -- ^ Byte address of the abbreviations table.
   , fileLength :: !Int
-    -- ^ Story file length in bytes, as declared in the header.
+  -- ^ Story file length in bytes, as declared in the header.
   , checksum :: !Word16
-    -- ^ Checksum declared in the header.
+  -- ^ Checksum declared in the header.
   }
   deriving (Eq, Show)
 
@@ -82,7 +82,8 @@ packedToByte :: Header -> Word16 -> Int
 packedToByte hdr packed = scale * fromIntegral packed
   where
     scale = case zVersion hdr of
-      v | v <= 3 -> 2
+      v
+        | v <= 3 -> 2
         | v <= 5 -> 4
         | v == 8 -> 8
       v -> error ("Grue.Header.packedToByte: unsupported version " ++ show v)

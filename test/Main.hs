@@ -48,15 +48,15 @@ tests stories =
 data StorySpec = StorySpec
   { specLocation :: StoryLocation
   , specKnownObjects :: [T.Text]
-    -- ^ Object names that must appear in the object table.
+  -- ^ Object names that must appear in the object table.
   , specIntro :: [T.Text]
-    -- ^ Substrings expected in the output before the first prompt.
-    -- Empty also marks stories that open with a yes\/no question
-    -- rather than a command prompt, which the save tests skip.
+  -- ^ Substrings expected in the output before the first prompt.
+  -- Empty also marks stories that open with a yes\/no question
+  -- rather than a command prompt, which the save tests skip.
   , specMinWords :: Int
-    -- ^ Sanity floor for the dictionary size.
+  -- ^ Sanity floor for the dictionary size.
   , specMinObjects :: Int
-    -- ^ Sanity floor for the object count.
+  -- ^ Sanity floor for the object count.
   }
 
 -- | Bundled stories live at a path relative to the repository;
@@ -574,24 +574,26 @@ interpTests =
     , testCase "store and inc work on globals" $
         runProg [0x0d, 0x10, 0x01, 0x95, 0x10, 0xe6, 0xbf, 0x10, 0xba]
           @?= ("2", Halted)
-    , testCase "push and pull use the evaluation stack" $
-        runProg
-          [ 0xe8, 0x7f, 7
-          , 0xe8, 0x7f, 9
-          , 0xe9, 0x7f, 0x10
-          , 0xe6, 0xbf, 0x10
-          , 0xe6, 0xbf, 0x00
-          , 0xba
-          ]
-          @?= ("97", Halted)
-    , testCase "random stays in range after seeding" $ do
-        let (out, stop) =
-              runProg
-                [ 0xe7, 0x3f, 0xff, 0xfb, 0x00
-                , 0xe7, 0x7f, 3, 0x10
-                , 0xe6, 0xbf, 0x10
-                , 0xba
+    , testCase "push and pull use the evaluation stack" $ do
+        let prog =
+              concat
+                [ [0xe8, 0x7f, 7] -- push 7
+                , [0xe8, 0x7f, 9] -- push 9
+                , [0xe9, 0x7f, 0x10] -- pull g0
+                , [0xe6, 0xbf, 0x10] -- print_num g0
+                , [0xe6, 0xbf, 0x00] -- print_num sp
+                , [0xba]
                 ]
+        runProg prog @?= ("97", Halted)
+    , testCase "random stays in range after seeding" $ do
+        let prog =
+              concat
+                [ [0xe7, 0x3f, 0xff, 0xfb, 0x00] -- random -5 (reseed)
+                , [0xe7, 0x7f, 3, 0x10] -- random 3 -> g0
+                , [0xe6, 0xbf, 0x10] -- print_num g0
+                , [0xba]
+                ]
+            (out, stop) = runProg prog
         stop @?= Halted
         assertBool ("out of range: " ++ T.unpack out) $
           out `elem` ["1", "2", "3"]
@@ -599,12 +601,13 @@ interpTests =
         -- Select a table at 0x180, print "hi" (redirected), deselect,
         -- then print "hi" again to the screen.
         let prog =
-              [ 0xf3, 0x4f, 0x03, 0x01, 0x80
-              , 0xb2, 0xb5, 0xc5
-              , 0xf3, 0x3f, 0xff, 0xfd
-              , 0xb2, 0xb5, 0xc5
-              , 0xba
-              ]
+              concat
+                [ [0xf3, 0x4f, 0x03, 0x01, 0x80] -- output_stream 3 0x180
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xf3, 0x3f, 0xff, 0xfd] -- output_stream -3
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xba]
+                ]
             (out, stop, vm) = run (bootProg [(64, prog)])
             mem = vmMemory vm
         (out, stop) @?= ("hi", Halted)
@@ -620,15 +623,16 @@ interpTests =
         -- reselect the upper window (cursor back to the top left) and
         -- overprint "X".
         let prog =
-              [ 0xea, 0x7f, 2 -- split_window 2
-              , 0xeb, 0x7f, 1 -- set_window 1
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xeb, 0x7f, 0 -- set_window 0
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xeb, 0x7f, 1 -- set_window 1
-              , 0xb2, 0x93, 0xa5 -- print "X"
-              , 0xba
-              ]
+              concat
+                [ [0xea, 0x7f, 2] -- split_window 2
+                , [0xeb, 0x7f, 1] -- set_window 1
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xeb, 0x7f, 0] -- set_window 0
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xeb, 0x7f, 1] -- set_window 1
+                , [0xb2, 0x93, 0xa5] -- print "X"
+                , [0xba]
+                ]
             (out, stop, vm) = runProgVM prog
         (out, stop) @?= ("hi", Halted)
         toList (upperLines (vmUpper vm)) @?= ["Xi", ""]
@@ -644,32 +648,35 @@ interpTests =
         toList (upperLines (vmUpper roomy)) @?= ["a", "b"]
     , testCase "splitting clears the upper window" $ do
         let prog =
-              [ 0xea, 0x7f, 1 -- split_window 1
-              , 0xeb, 0x7f, 1 -- set_window 1
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xea, 0x7f, 1 -- split_window 1 again
-              , 0xba
-              ]
+              concat
+                [ [0xea, 0x7f, 1] -- split_window 1
+                , [0xeb, 0x7f, 1] -- set_window 1
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xea, 0x7f, 1] -- split_window 1 again
+                , [0xba]
+                ]
             (_, _, vm) = runProgVM prog
         toList (upperLines (vmUpper vm)) @?= [""]
     , testCase "output_stream 2 transcribes and tracks Flags 2" $ do
         let prog =
-              [ 0xf3, 0x7f, 0x02 -- output_stream 2
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xf3, 0x3f, 0xff, 0xfe -- output_stream -2
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xba
-              ]
+              concat
+                [ [0xf3, 0x7f, 0x02] -- output_stream 2
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xf3, 0x3f, 0xff, 0xfe] -- output_stream -2
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xba]
+                ]
             (out, stop, vm) = runProgVM prog
         (out, stop) @?= ("hihi", Halted)
         fst (takeTranscript vm) @?= "hi"
         transcriptOn vm @?= False
     , testCase "the story can start a transcript through Flags 2" $ do
         let prog =
-              [ 0xe2, 0x57, 0x10, 0x01, 0x01 -- storeb 0x10 1 1
-              , 0xb2, 0xb5, 0xc5 -- print "hi"
-              , 0xba
-              ]
+              concat
+                [ [0xe2, 0x57, 0x10, 0x01, 0x01] -- storeb 0x10 1 1
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xba]
+                ]
             (_, _, vm) = runProgVM prog
         fst (takeTranscript vm) @?= "hi"
     , localOption (mkTimeout 2000000) $
@@ -677,31 +684,34 @@ interpTests =
           -- Branch past the restart once the transcript bit is found
           -- set; a lost bit would loop forever (hence the timeout).
           let prog =
-                [ 0x10, 0x10, 0x01, 0x00 -- loadb 0x10 1 -> sp
-                , 0x41, 0x00, 0x01, 0xc6 -- je sp 1 ?past-restart
-                , 0xf3, 0x7f, 0x02 -- output_stream 2
-                , 0xb7 -- restart
-                , 0xb2, 0xb5, 0xc5 -- print "hi"
-                , 0xba
-                ]
+                concat
+                  [ [0x10, 0x10, 0x01, 0x00] -- loadb 0x10 1 -> sp
+                  , [0x41, 0x00, 0x01, 0xc6] -- je sp 1 ?past-restart
+                  , [0xf3, 0x7f, 0x02] -- output_stream 2
+                  , [0xb7] -- restart
+                  , [0xb2, 0xb5, 0xc5] -- print "hi"
+                  , [0xba]
+                  ]
               (out, stop, vm) = runProgVM prog
           (out, stop) @?= ("hi", Halted)
           fst (takeTranscript vm) @?= "hi"
     , testCase "sound_effect bleeps reach the frontend" $ do
         let prog =
-              [ 0xf5, 0x7f, 0x01 -- sound_effect 1 (high bleep)
-              , 0xf5, 0x7f, 0x02 -- sound_effect 2 (low bleep)
-              , 0xf5, 0x5f, 0x03, 0x00 -- sound_effect 3 0 (sampled, ignored)
-              , 0xba
-              ]
+              concat
+                [ [0xf5, 0x7f, 0x01] -- sound_effect 1 (high bleep)
+                , [0xf5, 0x7f, 0x02] -- sound_effect 2 (low bleep)
+                , [0xf5, 0x5f, 0x03, 0x00] -- sound_effect 3 0 (sampled, ignored)
+                , [0xba]
+                ]
             (_, _, vm) = runProgVM prog
         fst (takeBeeps vm) @?= 2
     , testCase "input echoes into a running transcript" $ do
         let prog =
-              [ 0xf3, 0x7f, 0x02 -- output_stream 2
-              , 0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0 -- sread
-              , 0xba
-              ]
+              concat
+                [ [0xf3, 0x7f, 0x02] -- output_stream 2
+                , [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0] -- sread
+                , [0xba]
+                ]
             vm0 =
               bootProg
                 [(64, prog), (0x100, dictBytes), (0x180, [20]), (0x1c0, [5])]

@@ -1,0 +1,23 @@
+# Formatting rules for fourmolu (https://fourmolu.github.io).
+# Check: fourmolu --mode check src app test
+# Apply: fourmolu --mode inplace src app test
+indentation: 2
+column-limit: none
+function-arrows: trailing
+comma-style: leading
+import-export-style: leading
+import-grouping: legacy
+indent-wheres: true
+record-brace-space: true
+newlines-between-decls: 1
+haddock-style: single-line
+let-style: auto
+in-style: right-align
+single-constraint-parens: always
+single-deriving-parens: always
+sort-constraints: false
+sort-derived-classes: false
+sort-deriving-clauses: false
+trailing-section-operators: true
+unicode: never
+respectful: true
