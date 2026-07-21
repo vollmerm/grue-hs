@@ -9,6 +9,11 @@ maintainer:         michael.vollmer90@gmail.com
 category:           Game
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
+                    README.md
+
+source-repository head
+    type:     git
+    location: https://github.com/vollmerm/grue-hs.git
 
 common warnings
     ghc-options: -Wall
