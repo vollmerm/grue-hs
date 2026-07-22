@@ -32,11 +32,17 @@ module Grue.VM
   , emitTranscript
   , takeTranscript
 
-    -- * The upper window
+    -- * The upper window and screen state
   , UpperWindow (..)
   , splitUpper
   , selectWindow
   , writeUpper
+  , setCursor
+  , cursorPosition
+  , eraseWindow
+  , eraseLine
+  , setTextStyle
+  , setBufferMode
 
     -- * Sound
   , emitBeep
@@ -86,6 +92,9 @@ data PendingInput
       Int
       -- | Byte address of the parse buffer.
       Int
+  | -- | A single keypress for @read_char@; the store variable receives
+    -- the ZSCII code.
+    PendingReadChar Word8
   | PendingSave Branch
   | PendingRestore Branch
   deriving (Eq, Show)
@@ -123,6 +132,12 @@ data VM = VM
   -- ^ The window receiving output: 0 for the scrolling lower
   -- window, 1 for the upper.
   , vmUpper :: UpperWindow
+  , vmTextStyle :: Int
+  -- ^ The active text style, a bitmask of reverse video (1), bold (2),
+  -- italic (4) and fixed pitch (8), as set by @set_text_style@.
+  , vmBufferMode :: Bool
+  -- ^ Whether lower-window output is buffered for word-wrapping
+  -- (@buffer_mode@); on by default.
   , vmBeeps :: Int
   -- ^ Bleeps requested by @sound_effect@ and not yet sounded.
   , vmTables :: [(Int, Int)]
@@ -147,6 +162,8 @@ boot story =
     , vmTranscript = []
     , vmWindow = 0
     , vmUpper = UpperWindow 0 (0, 0) Seq.empty
+    , vmTextStyle = 0
+    , vmBufferMode = True
     , vmBeeps = 0
     , vmTables = []
     , vmPending = Nothing
@@ -306,6 +323,57 @@ writeUpper t vm = vm {vmUpper = go (vmUpper vm) t}
         place line =
           let padded = line <> T.replicate (col - T.length line) (T.singleton ' ')
            in T.take col padded <> chunk <> T.drop (col + T.length chunk) padded
+
+-- | Move the upper window's cursor.  Rows and columns are given
+-- one-based, as the @set_cursor@ opcode supplies them.
+setCursor :: Int -> Int -> VM -> VM
+setCursor row col vm =
+  vm {vmUpper = (vmUpper vm) {upperCursor = (max 0 (row - 1), max 0 (col - 1))}}
+
+-- | The upper window's cursor, one-based (row, column), as reported by
+-- @get_cursor@.
+cursorPosition :: VM -> (Int, Int)
+cursorPosition vm = (row + 1, col + 1)
+  where
+    (row, col) = upperCursor (vmUpper vm)
+
+-- | Clear a window, or collapse the split for the whole-screen forms.
+-- Clearing the lower window (0) is left to the frontend; window 1 and
+-- the whole-screen form (-2) blank the upper window, while -1 also
+-- collapses the split.
+eraseWindow :: Int -> VM -> VM
+eraseWindow w vm = case w of
+  1 -> blankUpper vm
+  (-2) -> blankUpper vm
+  (-1) -> selectWindow 0 (splitUpper 0 vm)
+  _ -> vm
+  where
+    blankUpper v =
+      let h = upperHeight (vmUpper v)
+       in v {vmUpper = UpperWindow h (0, 0) (Seq.replicate h T.empty)}
+
+-- | Erase from the upper window's cursor to the end of its current row.
+-- Stored rows are unpadded, so truncating to the cursor column blanks
+-- the remainder.
+eraseLine :: VM -> VM
+eraseLine vm
+  | row < upperHeight w =
+      vm {vmUpper = w {upperLines = Seq.adjust' (T.take col) row (upperLines w)}}
+  | otherwise = vm
+  where
+    w = vmUpper vm
+    (row, col) = upperCursor w
+
+-- | Set the text style: a bitmask combining reverse video, bold, italic
+-- and fixed pitch.  Style 0 (roman) clears all of them; others
+-- accumulate.
+setTextStyle :: Int -> VM -> VM
+setTextStyle 0 vm = vm {vmTextStyle = 0}
+setTextStyle s vm = vm {vmTextStyle = vmTextStyle vm .|. s}
+
+-- | Turn word-wrap buffering of the lower window on or off.
+setBufferMode :: Bool -> VM -> VM
+setBufferMode on vm = vm {vmBufferMode = on}
 
 -- | Ask the frontend for a bleep.
 emitBeep :: VM -> VM

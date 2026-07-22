@@ -10,6 +10,7 @@ module Grue.Interp
   ( Stop (..)
   , run
   , provideInput
+  , provideChar
   , finishSave
   , finishRestore
 
@@ -46,6 +47,9 @@ data Stop
   = -- | The @read@ opcode wants a line of input; resume with
     -- 'provideInput' followed by 'run'.
     NeedInput
+  | -- | The @read_char@ opcode wants a single keypress; resume with
+    -- 'provideChar' followed by 'run'.
+    NeedChar
   | -- | The story wants these bytes written somewhere durable; report
     -- the outcome with 'finishSave' and 'run' again.
     SaveRequested ByteString
@@ -238,6 +242,21 @@ exec (Instruction op operands st br text) = case op of
   Storeb -> continue $ do
     (base, idx, v) <- val3
     onMemory (pokeByte (arrayAddr base idx) (fromIntegral v))
+  ScanTable -> continue $ do
+    vals <- values operands
+    (x, table, len, form) <- case vals of
+      [a, b, c] -> pure (a, b, c, 0x82)
+      [a, b, c, d] -> pure (a, b, c, d)
+      _ -> badOperands
+    mem <- gets vmMemory
+    let stride = fromIntegral (form .&. 0x7f)
+        readField a
+          | testBit form 7 = peekWord mem a
+          | otherwise = fromIntegral (peekByte mem a)
+        fields = [fromIntegral table + i * stride | i <- [0 .. fromIntegral len - 1]]
+    case filter ((== x) . readField) fields of
+      (a : _) -> storeTo st (fromIntegral a) >> branchOn br True
+      [] -> storeTo st 0 >> branchOn br False
   -- Objects
   GetParent -> continue $ do
     o <- val1
@@ -303,11 +322,10 @@ exec (Instruction op operands st br text) = case op of
     t <- withWorld (\mem hdr -> Obj.shortName mem hdr (obj o))
     output t
   -- Control
-  Call -> continue $ do
-    vals <- values operands
-    case vals of
-      (routine : args) -> callRoutine routine args st
-      [] -> error "Grue.Interp: call with no operands"
+  Call -> doCall
+  Call1s -> doCall
+  Call2s -> doCall
+  CallVs2 -> doCall
   Ret -> continue $ do
     v <- val1
     returnValue v
@@ -330,12 +348,20 @@ exec (Instruction op operands st br text) = case op of
       EQ -> do
         modify (\vm -> vm {vmRng = advance (vmRng vm)})
         storeTo st 0
-  -- Input
+  -- Input.  From version 4 read also accepts optional time and routine
+  -- operands for timed input, which are ignored here.
   Sread -> do
-    (tbuf, pbuf) <- val2
-    modify $ \vm ->
-      vm {vmPending = Just (PendingRead (fromIntegral tbuf) (fromIntegral pbuf))}
-    pure (Just NeedInput)
+    vals <- values operands
+    case vals of
+      (tbuf : pbuf : _) -> do
+        modify $ \vm ->
+          vm {vmPending = Just (PendingRead (fromIntegral tbuf) (fromIntegral pbuf))}
+        pure (Just NeedInput)
+      _ -> badOperands
+  ReadChar -> do
+    _ <- values operands -- the first operand is 1 (the keyboard)
+    modify $ \vm -> vm {vmPending = Just (PendingReadChar (fromMaybe 0 st))}
+    pure (Just NeedChar)
   -- The wider world
   Verify ->
     branch0 $
@@ -357,6 +383,20 @@ exec (Instruction op operands st br text) = case op of
   ShowStatus -> continue (pure ())
   SplitWindow -> continue (val1 >>= modify . splitUpper . fromIntegral)
   SetWindow -> continue (val1 >>= modify . selectWindow . fromIntegral)
+  SetCursor -> continue $ do
+    (row, col) <- val2
+    modify (setCursor (fromIntegral row) (fromIntegral col))
+  GetCursor -> continue $ do
+    arr <- val1
+    (row, col) <- gets cursorPosition
+    onMemory
+      ( pokeWord (fromIntegral arr) (fromIntegral row)
+          . pokeWord (fromIntegral arr + 2) (fromIntegral col)
+      )
+  SetTextStyle -> continue (val1 >>= modify . setTextStyle . fromIntegral)
+  BufferMode -> continue (val1 >>= modify . setBufferMode . (/= 0))
+  EraseWindow -> continue (val1 >>= modify . eraseWindow . signed)
+  EraseLine -> continue (void val1 >> modify eraseLine)
   OutputStream -> continue $ do
     vals <- values operands
     case map signed vals of
@@ -374,6 +414,14 @@ exec (Instruction op operands st br text) = case op of
       _ -> modify emitBeep
   where
     continue act = Nothing <$ act
+
+    -- The call opcodes differ only in form: the first operand is the
+    -- packed routine address and the rest are arguments.
+    doCall = continue $ do
+      vals <- values operands
+      case vals of
+        (routine : args) -> callRoutine routine args st
+        [] -> error "Grue.Interp: call with no operands"
 
     val1 = values operands >>= expect1
     val2 = values operands >>= expect2
@@ -542,6 +590,14 @@ provideInput input vm = case vmPending vm of
       counted = pokeByte (pbuf + 1) (fromIntegral (length tokens)) . parseWrites
       written = counted (terminated mem)
   _ -> error "Grue.Interp.provideInput: no read is pending"
+
+-- | Complete a pending @read_char@ by storing the ZSCII code of the
+-- keypress in the instruction's store variable.
+provideChar :: Word16 -> VM -> VM
+provideChar code vm = case vmPending vm of
+  Just (PendingReadChar var) ->
+    writeVar var code vm {vmPending = Nothing}
+  _ -> error "Grue.Interp.provideChar: no read_char is pending"
 
 -- | What the status line should currently show.
 data StatusLine = StatusLine

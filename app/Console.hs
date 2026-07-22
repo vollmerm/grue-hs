@@ -34,6 +34,9 @@ play story = do
         NeedInput ->
           withLine (finish atLineStart') $ \line ->
             loop atLineStart' script' (provideInput (T.strip line) vm'')
+        NeedChar ->
+          withLine (finish atLineStart') $ \line ->
+            loop atLineStart' script' (provideChar (firstCode line) vm'')
         SaveRequested bytes -> do
           putStr "Save to file: "
           withLine (loop True script' (finishSave False vm'')) $ \name -> do
@@ -49,6 +52,11 @@ play story = do
     withLine onEOF act = do
       eof <- hIsEOF stdin
       if eof then onEOF else act =<< TIO.getLine
+    -- read_char takes the first character of the line (a bare return
+    -- becomes ZSCII 13), which suits scripted single-key prompts.
+    firstCode line = case T.uncons line of
+      Just (c, _) -> fromIntegral (fromEnum c)
+      Nothing -> 13
 
 -- | Write transcript text to its file, asking for the file name on
 -- first use.  An empty name, end of input, or a write failure turns

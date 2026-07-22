@@ -11,12 +11,14 @@
 module CursesUI (play) where
 
 import Control.Exception (finally)
-import Control.Monad (replicateM_, void, zipWithM_)
+import Control.Monad (replicateM_, void, when, zipWithM_)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word16)
 import Files
+import Grue.Header (zVersion)
 import Grue.Interp
 import Grue.VM
 import Text.Printf (printf)
@@ -52,6 +54,10 @@ loop script buf vm0 = do
     NeedInput -> do
       line <- editLine vm buf'
       loop script' (append buf' (line <> "\n")) (provideInput line vm)
+    NeedChar -> do
+      render vm buf' ""
+      key <- CursesHelper.getKey (render vm buf' "")
+      loop script' buf' (provideChar (keyCode key) vm)
     SaveRequested bytes -> do
       let prompt = append buf' "Save to file: "
       name <- editLine vm prompt
@@ -97,7 +103,7 @@ addOutput :: VM -> Scrollback -> Text -> IO Scrollback
 addOutput vm buf out = do
   (rows, cols) <- Curses.scrSize
   let width = max 20 (cols - 1)
-      top = 1 + upperHeight (vmUpper vm)
+      top = topRow vm
       textRows = max 1 (rows - top)
       pageRows = max 1 (textRows - 1)
       buf' = append buf out
@@ -144,6 +150,16 @@ editLine vm buf = edit ""
           | c >= ' ' -> edit (input <> T.singleton c)
         _ -> edit input
 
+-- | The ZSCII code of a keypress for @read_char@.  Enter becomes 13;
+-- other keys pass through their character code.
+keyCode :: Curses.Key -> Word16
+keyCode key = case key of
+  Curses.KeyChar '\n' -> 13
+  Curses.KeyChar '\r' -> 13
+  Curses.KeyEnter -> 13
+  Curses.KeyChar c -> fromIntegral (fromEnum c)
+  _ -> 13
+
 -- | Redraw the whole screen: status line, any upper window, story
 -- text, pending input.
 render :: VM -> Scrollback -> Text -> IO ()
@@ -165,14 +181,27 @@ render vm buf input = do
     withInput (open : rest) = (open <> input) : rest
     lastMaybe xs = if null xs then Nothing else Just (last xs)
 
--- | Draw the fixed top of the screen -- the status line and the
--- story's upper window, if split -- returning the first row left for
--- scrolling story text.
+-- | Draw the fixed top of the screen -- the status line (versions 1 to
+-- 3 only) and the story's upper window, if split -- returning the first
+-- row left for scrolling story text.
 drawTop :: VM -> Int -> IO Int
 drawTop vm cols = do
-  drawStatus cols (statusLine vm)
-  drawLines 1 (map (T.take (cols - 1)) (toList (upperLines (vmUpper vm))))
-  pure (1 + upperHeight (vmUpper vm))
+  when (hasStatusLine vm) (drawStatus cols (statusLine vm))
+  drawLines statusRows (map (T.take (cols - 1)) (toList (upperLines (vmUpper vm))))
+  pure (topRow vm)
+  where
+    statusRows = if hasStatusLine vm then 1 else 0
+
+-- | Versions 1 to 3 show an interpreter-drawn status line on the top
+-- row; version 4 games draw their own status region using the upper
+-- window instead.
+hasStatusLine :: VM -> Bool
+hasStatusLine vm = zVersion (vmHeader vm) <= 3
+
+-- | The first screen row that scrolling story text may use: below the
+-- status line (if any) and the upper window.
+topRow :: VM -> Int
+topRow vm = (if hasStatusLine vm then 1 else 0) + upperHeight (vmUpper vm)
 
 -- | Draw lines of text down the screen from a starting row.
 drawLines :: Int -> [Text] -> IO ()

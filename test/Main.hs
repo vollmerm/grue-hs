@@ -516,9 +516,13 @@ objectV4Cases =
 -- | Decode the instruction assembled from the given bytes, placed at
 -- address 64 of an otherwise empty story.
 decodeAt :: [Word8] -> (Instruction, Int)
-decodeAt bytes = decode mem (readHeader mem) 64
+decodeAt = decodeAtVersion 3
+
+-- | Decode an instruction in a story of the given version.
+decodeAtVersion :: Word8 -> [Word8] -> (Instruction, Int)
+decodeAtVersion version bytes = decode mem (readHeader mem) 64
   where
-    mem = mkStory [] bytes
+    mem = mkStoryVersion version [] bytes
 
 instructionTests :: TestTree
 instructionTests =
@@ -594,15 +598,58 @@ instructionTests =
                   Nothing
               , 68
               )
+    , testGroup "version 4 opcodes" instructionV4Cases
     ]
+
+instructionV4Cases :: [TestTree]
+instructionV4Cases =
+  [ testCase "call_1s stores its result" $
+      decodeAtVersion 4 [0x98, 0x12, 0x03]
+        @?= (Instruction Call1s [SmallConst 0x12] (Just 3) Nothing Nothing, 67)
+  , testCase "call_2s stores its result" $
+      decodeAtVersion 4 [0x19, 0x0a, 0x0b, 0x04]
+        @?= ( Instruction
+                Call2s
+                [SmallConst 0x0a, SmallConst 0x0b]
+                (Just 4)
+                Nothing
+                Nothing
+            , 68
+            )
+  , testCase "call_vs2 reads two type bytes for up to eight operands" $
+      decodeAtVersion 4 [0xec, 0x55, 0x7f, 1, 2, 3, 4, 5, 0x06]
+        @?= ( Instruction
+                CallVs2
+                (map SmallConst [1, 2, 3, 4, 5])
+                (Just 6)
+                Nothing
+                Nothing
+            , 73
+            )
+  , testCase "scan_table both stores and branches" $
+      decodeAtVersion 4 [0xf7, 0x57, 0x05, 0x40, 0x03, 0x07, 0xc5]
+        @?= ( Instruction
+                ScanTable
+                [SmallConst 5, SmallConst 0x40, SmallConst 3]
+                (Just 7)
+                (Just (Branch True 70 (BranchAddr 74)))
+                Nothing
+            , 71
+            )
+  ]
 
 -- | Boot a story assembled from segments of bytes at absolute
 -- addresses.  The header points the program counter at 64, the
 -- dictionary at 0x100, and the globals at 0x130.
 bootProg :: [(Int, [Word8])] -> VM
-bootProg segments = boot flattened
+bootProg = bootProgVersion 3
+
+-- | Like 'bootProg', but for a story of the given version.
+bootProgVersion :: Word8 -> [(Int, [Word8])] -> VM
+bootProgVersion version segments = boot flattened
   where
-    mem0 = mkStory [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
+    mem0 =
+      mkStoryVersion version [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
     place (addr, bytes) m =
       foldr (\(i, b) -> pokeByte i b) m (zip [addr ..] bytes)
     mem = foldr place mem0 segments
@@ -822,6 +869,20 @@ interpTests =
         peekWord mem 0x1c6 @?= 0
         peekByte mem 0x1c8 @?= 4
         peekByte mem 0x1c9 @?= 5
+    , testCase "scan_table finds a matching word and stores its address" $ do
+        let table = concatMap wordBytes [10, 20, 30]
+            -- scan_table 20 0x140 3 -> G0 ?(next); quit
+            code = [0xf7, 0x03, 0x00, 0x14, 0x01, 0x40, 0x00, 0x03, 0x10, 0xc2, 0xba]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, code), (0x140, table)])
+        stop @?= Halted
+        peekVar 16 vm @?= 0x142
+    , testCase "scan_table reports a miss as zero" $ do
+        let table = concatMap wordBytes [10, 20, 30]
+            -- scan_table 99 0x140 3 -> G0 ?(next); quit
+            code = [0xf7, 0x03, 0x00, 0x63, 0x01, 0x40, 0x00, 0x03, 0x10, 0xc2, 0xba]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, code), (0x140, table)])
+        stop @?= Halted
+        peekVar 16 vm @?= 0
     ]
 
 -- | Checks against real story files found on this machine.
