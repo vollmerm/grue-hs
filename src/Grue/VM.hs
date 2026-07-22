@@ -152,12 +152,28 @@ boot story =
     , vmPending = Nothing
     }
   where
-    -- Bit 5 of Flags 1 announces to the story that screen splitting
-    -- is available.
-    mem = pokeByte 0x01 (peekByte loaded 0x01 .|. 0x20) loaded
     loaded = fromStory story
+    mem
+      | peekByte loaded 0x00 <= 3 =
+          -- Bit 5 of Flags 1 announces that screen splitting is
+          -- available.
+          pokeByte 0x01 (peekByte loaded 0x01 .|. 0x20) loaded
+      | otherwise = stampCapabilities loaded
     hdr = readHeader mem
     baseFrame = Frame Seq.empty [] 0 0 0
+
+-- | Announce version 4 display capabilities in the header and record
+-- the interpreter's identity and screen size.  Flags 1 advertises that
+-- boldface, italic and a fixed-space font are available (bits 2 to 4);
+-- the other capability bits stay clear, since colours, pictures, sound
+-- and timed input are not provided.
+stampCapabilities :: Memory -> Memory
+stampCapabilities =
+  pokeByte 0x01 0x1c
+    . pokeByte 0x1e 6 -- interpreter number: IBM PC
+    . pokeByte 0x1f 0x41 -- interpreter version: 'A'
+    . pokeByte 0x20 25 -- screen height in lines
+    . pokeByte 0x21 80 -- screen width in characters
 
 -- | Apply a function to the current (topmost) frame.
 onFrame :: (Frame -> Frame) -> VM -> VM

@@ -1,10 +1,13 @@
 -- | The object table: attributes, the object tree, and properties.
 --
--- Objects are numbered from 1, with 0 meaning \"nothing\".  This module
--- implements the version 1 to 3 layout: a 31-word property defaults
--- table, 9-byte object entries (32 attribute flags, byte-sized tree
--- links and a property table pointer), and property blocks with a
--- single size byte.
+-- Objects are numbered from 1, with 0 meaning \"nothing\".  The table
+-- layout depends on the story version.  Versions 1 to 3 use a 31-word
+-- property defaults table and 9-byte entries (32 attribute flags,
+-- byte-sized tree links and a property-table pointer), with property
+-- blocks introduced by a single size byte.  Versions 4 and later use a
+-- 63-word defaults table and 14-byte entries (48 attribute flags,
+-- word-sized tree links), with property blocks introduced by one or two
+-- size bytes.
 module Grue.Object
   ( -- * Attributes
     testAttr
@@ -39,13 +42,37 @@ import Grue.Header
 import Grue.Memory
 import Grue.ZString
 
--- | The byte address of an object's 9-byte entry.
+-- | The version-dependent shape of the object table.
+data Layout = Layout
+  { entrySize :: Int
+  -- ^ Bytes per object entry: 9 in versions 1 to 3, 14 from version 4.
+  , defaultsBytes :: Int
+  -- ^ Size of the property defaults table (31 or 63 words).
+  , attrBytes :: Int
+  -- ^ Bytes of attribute flags (4 or 6) at the start of an entry.
+  , linkWord :: Bool
+  -- ^ Whether tree links are 2-byte words (version 4) or single bytes.
+  , propPtrOffset :: Int
+  -- ^ Offset within an entry of the property-table pointer word.
+  }
+
+-- | The object-table layout for a story version.
+layout :: Header -> Layout
+layout hdr
+  | zVersion hdr <= 3 = Layout 9 62 4 False 7
+  | otherwise = Layout 14 126 6 True 12
+
+-- | The byte address of an object's entry.
 objectAddr :: Header -> Int -> Int
-objectAddr hdr obj = objectTableAddr hdr + 62 + 9 * (obj - 1)
+objectAddr hdr obj =
+  objectTableAddr hdr + defaultsBytes l + entrySize l * (obj - 1)
+  where
+    l = layout hdr
 
 -- | The byte address of an object's property table.
 propTableAddr :: Memory -> Header -> Int -> Int
-propTableAddr mem hdr obj = fromIntegral (peekWord mem (objectAddr hdr obj + 7))
+propTableAddr mem hdr obj =
+  fromIntegral (peekWord mem (objectAddr hdr obj + propPtrOffset (layout hdr)))
 
 -- | The byte within an object's entry holding an attribute, and the
 -- bit position of the attribute in it.  Attributes are stored topmost
@@ -76,25 +103,50 @@ clearAttr hdr obj attr mem = pokeByte addr (clearBit (peekByte mem addr) bit) me
   where
     (addr, bit) = attrLocation hdr obj attr
 
+-- | The byte address of tree link @k@ (0 parent, 1 sibling, 2 child)
+-- within an object's entry.
+linkAddr :: Header -> Int -> Int -> Int
+linkAddr hdr obj k = objectAddr hdr obj + attrBytes l + k * linkSize
+  where
+    l = layout hdr
+    linkSize = if linkWord l then 2 else 1
+
+-- | Read one of an object's tree links, respecting the version's link
+-- width.
+readLink :: Memory -> Header -> Int -> Int -> Int
+readLink mem hdr obj k
+  | linkWord (layout hdr) = fromIntegral (peekWord mem addr)
+  | otherwise = fromIntegral (peekByte mem addr)
+  where
+    addr = linkAddr hdr obj k
+
+-- | Write one of an object's tree links.
+writeLink :: Header -> Int -> Int -> Int -> Memory -> Memory
+writeLink hdr obj k v
+  | linkWord (layout hdr) = pokeWord addr (fromIntegral v)
+  | otherwise = pokeByte addr (fromIntegral v)
+  where
+    addr = linkAddr hdr obj k
+
 -- | An object's parent (0 if none).
 parent :: Memory -> Header -> Int -> Int
 parent _ _ 0 = 0
-parent mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 4))
+parent mem hdr obj = readLink mem hdr obj 0
 
 -- | An object's next sibling (0 if none).
 sibling :: Memory -> Header -> Int -> Int
 sibling _ _ 0 = 0
-sibling mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 5))
+sibling mem hdr obj = readLink mem hdr obj 1
 
 -- | An object's first child (0 if none).
 child :: Memory -> Header -> Int -> Int
 child _ _ 0 = 0
-child mem hdr obj = fromIntegral (peekByte mem (objectAddr hdr obj + 6))
+child mem hdr obj = readLink mem hdr obj 2
 
 setParent, setSibling, setChild :: Header -> Int -> Int -> Memory -> Memory
-setParent hdr obj v = pokeByte (objectAddr hdr obj + 4) (fromIntegral v)
-setSibling hdr obj v = pokeByte (objectAddr hdr obj + 5) (fromIntegral v)
-setChild hdr obj v = pokeByte (objectAddr hdr obj + 6) (fromIntegral v)
+setParent hdr obj v = writeLink hdr obj 0 v
+setSibling hdr obj v = writeLink hdr obj 1 v
+setChild hdr obj v = writeLink hdr obj 2 v
 
 -- | Detach an object from the tree: unlink it from its parent's child
 -- list and leave it parentless and siblingless.  Detaching an already
@@ -155,10 +207,24 @@ propBlocks mem hdr obj = go firstProp
     firstProp = base + 1 + 2 * nameWords
     go addr = case fromIntegral (peekByte mem addr) :: Int of
       0 -> []
-      size -> PropBlock num (addr + 1) len : go (addr + 1 + len)
+      size -> PropBlock num dataAddr len : go (dataAddr + len)
         where
-          num = size .&. 31
-          len = size `shiftR` 5 + 1
+          (num, len, dataAddr) = decodeSize mem hdr addr size
+
+-- | Decode a property's size byte(s) at an address into its number,
+-- data length and the address of its data.  Versions 1 to 3 pack both
+-- into a single byte; versions 4 and later use the low six bits for the
+-- number and, when the top bit is set, a second byte for the length.
+decodeSize :: Memory -> Header -> Int -> Int -> (Int, Int, Int)
+decodeSize mem hdr addr size
+  | zVersion hdr <= 3 = (size .&. 31, size `shiftR` 5 + 1, addr + 1)
+  | testBit size 7 = (size .&. 63, longLen, addr + 2)
+  | testBit size 6 = (size .&. 63, 2, addr + 1)
+  | otherwise = (size .&. 63, 1, addr + 1)
+  where
+    longLen = case fromIntegral (peekByte mem (addr + 1)) .&. 63 of
+      0 -> 64
+      n -> n
 
 -- | Find a property of an object by number.
 findProp :: Memory -> Header -> Int -> Int -> Maybe PropBlock
@@ -201,9 +267,15 @@ propertyAddr mem hdr obj n = maybe 0 propDataAddr (findProp mem hdr obj n)
 -- | The length of the property whose data starts at the given address,
 -- read back from the size byte before it.  By convention an address of
 -- 0 (an absent property) has length 0.
-propertyLen :: Memory -> Int -> Int
-propertyLen _ 0 = 0
-propertyLen mem addr = fromIntegral (peekByte mem (addr - 1)) `shiftR` 5 + 1
+propertyLen :: Memory -> Header -> Int -> Int
+propertyLen _ _ 0 = 0
+propertyLen mem hdr addr
+  | zVersion hdr <= 3 = fromIntegral b `shiftR` 5 + 1
+  | testBit b 7 = case fromIntegral b .&. 63 of 0 -> 64; n -> n
+  | testBit b 6 = 2
+  | otherwise = 1
+  where
+    b = peekByte mem (addr - 1)
 
 -- | The number of the property listed after property @n@ of an object,
 -- or the first property when @n@ is 0, or 0 when there are no more.

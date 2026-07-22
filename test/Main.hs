@@ -170,9 +170,14 @@ memoryTests =
 -- the given word fields poked in, followed by a payload starting at
 -- address 64.
 mkStory :: [(Int, Word16)] -> [Word8] -> Memory
-mkStory fields payload = foldr (uncurry pokeWord) versioned fields
+mkStory = mkStoryVersion 3
+
+-- | Build a story of a given version from header field overrides and a
+-- payload placed just after the 64-byte header.
+mkStoryVersion :: Word8 -> [(Int, Word16)] -> [Word8] -> Memory
+mkStoryVersion version fields payload = foldr (uncurry pokeWord) versioned fields
   where
-    versioned = pokeByte 0 3 blank
+    versioned = pokeByte 0 version blank
     blank = fromStory (BS.pack (replicate 64 0 ++ payload))
 
 -- | The synthetic story used by the header tests, with distinctive
@@ -400,9 +405,9 @@ objectTests =
         Obj.propertyAddr objStory hdr 1 18 @?= 157
         Obj.propertyAddr objStory hdr 1 4 @?= 160
         Obj.propertyAddr objStory hdr 1 5 @?= 0
-        Obj.propertyLen objStory 157 @?= 2
-        Obj.propertyLen objStory 160 @?= 1
-        Obj.propertyLen objStory 0 @?= 0
+        Obj.propertyLen objStory hdr 157 @?= 2
+        Obj.propertyLen objStory hdr 160 @?= 1
+        Obj.propertyLen objStory hdr 0 @?= 0
     , testCase "walks the property list in order" $ do
         let hdr = readHeader objStory
         Obj.nextProperty objStory hdr 1 0 @?= 18
@@ -431,7 +436,82 @@ objectTests =
         Obj.sibling mem hdr 2 @?= 0
     , testCase "counts the objects" $
         Obj.objectCount objStory (readHeader objStory) @?= 3
+    , testGroup "version 4 layout" objectV4Cases
     ]
+
+-- | A version 4 story with the same three-object tree as 'objStory',
+-- exercising the wider v4 layout: 14-byte entries with word-sized links
+-- and 48 attributes, a 63-word defaults table, and the one- and
+-- two-byte property size encodings.  Object 1 provides properties 20
+-- (three bytes, stored with two size bytes), 18 (a word) and 4 (a
+-- byte); the defaults table gives property 5 the value 0xab.
+objStoryV4 :: Memory
+objStoryV4 = mkStoryVersion 4 [(0x0a, 64), (72, 0x00ab)] payload
+  where
+    defaults = replicate 126 0
+    entry (par, sib, chi, props) =
+      replicate 6 0 ++ concatMap wordBytes [par, sib, chi, props]
+    entries =
+      concatMap
+        entry
+        [ (0, 0, 2, 232) -- object 1
+        , (1, 3, 0, 246) -- object 2
+        , (1, 0, 0, 248) -- object 3
+        ]
+    propTable1 =
+      [1, 0x9e, 0x9d] -- short name "box"
+        ++ [0x94, 0xc3, 0x11, 0x22, 0x33] -- property 20, three bytes (two size bytes)
+        ++ [0x52, 0xca, 0xfe] -- property 18, a word
+        ++ [4, 7] -- property 4, a byte
+        ++ [0]
+    propTable2 = [0, 0]
+    propTable3 = [0, 0]
+    payload = defaults ++ entries ++ propTable1 ++ propTable2 ++ propTable3
+
+objectV4Cases :: [TestTree]
+objectV4Cases =
+  [ testCase "reads word-sized tree links" $ do
+      let hdr = readHeader objStoryV4
+      Obj.parent objStoryV4 hdr 2 @?= 1
+      Obj.sibling objStoryV4 hdr 2 @?= 3
+      Obj.child objStoryV4 hdr 1 @?= 2
+      Obj.parent objStoryV4 hdr 1 @?= 0
+  , testCase "attributes span 48 flags" $ do
+      let hdr = readHeader objStoryV4
+      Obj.testAttr objStoryV4 hdr 1 47 @?= False
+      let mem1 = Obj.setAttr hdr 1 47 objStoryV4
+      Obj.testAttr mem1 hdr 1 47 @?= True
+      peekByte mem1 (64 + 126 + 5) @?= 0x01
+      let mem2 = Obj.setAttr hdr 1 0 mem1
+      peekByte mem2 (64 + 126) @?= 0x80
+  , testCase "reads short names" $ do
+      let hdr = readHeader objStoryV4
+      Obj.shortName objStoryV4 hdr 1 @?= "box"
+      Obj.shortName objStoryV4 hdr 2 @?= ""
+  , testCase "property values across both size encodings" $ do
+      let hdr = readHeader objStoryV4
+      Obj.propertyValue objStoryV4 hdr 1 20 @?= 0x1122
+      Obj.propertyValue objStoryV4 hdr 1 18 @?= 0xcafe
+      Obj.propertyValue objStoryV4 hdr 1 4 @?= 7
+      Obj.propertyValue objStoryV4 hdr 1 5 @?= 0x00ab
+      Obj.propertyValue objStoryV4 hdr 1 1 @?= 0
+  , testCase "property addresses and lengths" $ do
+      let hdr = readHeader objStoryV4
+      Obj.propertyAddr objStoryV4 hdr 1 20 @?= 237
+      Obj.propertyAddr objStoryV4 hdr 1 18 @?= 241
+      Obj.propertyAddr objStoryV4 hdr 1 4 @?= 244
+      Obj.propertyLen objStoryV4 hdr 237 @?= 3
+      Obj.propertyLen objStoryV4 hdr 241 @?= 2
+      Obj.propertyLen objStoryV4 hdr 244 @?= 1
+  , testCase "walks the property list in descending order" $ do
+      let hdr = readHeader objStoryV4
+      Obj.nextProperty objStoryV4 hdr 1 0 @?= 20
+      Obj.nextProperty objStoryV4 hdr 1 20 @?= 18
+      Obj.nextProperty objStoryV4 hdr 1 18 @?= 4
+      Obj.nextProperty objStoryV4 hdr 1 4 @?= 0
+  , testCase "counts the objects" $
+      Obj.objectCount objStoryV4 (readHeader objStoryV4) @?= 3
+  ]
 
 -- | Decode the instruction assembled from the given bytes, placed at
 -- address 64 of an otherwise empty story.

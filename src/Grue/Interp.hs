@@ -271,7 +271,7 @@ exec (Instruction op operands st br text) = case op of
     storeTo st (fromIntegral v)
   GetPropLen -> continue $ do
     addr <- val1
-    v <- gets (\vm -> Obj.propertyLen (vmMemory vm) (fromIntegral addr))
+    v <- gets (\vm -> Obj.propertyLen (vmMemory vm) (vmHeader vm) (fromIntegral addr))
     storeTo st (fromIntegral v)
   PutProp -> continue $ do
     (o, p, v) <- val3
