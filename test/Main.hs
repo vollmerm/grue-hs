@@ -38,6 +38,7 @@ tests stories =
     , objectTests
     , instructionTests
     , interpTests
+    , conformanceTests
     , storyTests stories
     ]
 
@@ -47,6 +48,8 @@ tests stories =
 -- external collection (see 'storyRoot') and skipped when absent.
 data StorySpec = StorySpec
   { specLocation :: StoryLocation
+  , specVersion :: Int
+  -- ^ The Z-machine version the story file should report.
   , specKnownObjects :: [T.Text]
   -- ^ Object names that must appear in the object table.
   , specIntro :: [T.Text]
@@ -67,6 +70,7 @@ storySpecs :: [StorySpec]
 storySpecs =
   [ StorySpec
       { specLocation = Bundled "test/stories/cloak.z3"
+      , specVersion = 3
       , specKnownObjects = ["Foyer of the Opera House", "small brass hook"]
       , specIntro = ["Cloak of Darkness", "Foyer of the Opera House"]
       , specMinWords = 100
@@ -74,6 +78,7 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "zorks/zork1.z3"
+      , specVersion = 3
       , specKnownObjects = ["West of House", "brass lantern"]
       , specIntro = ["ZORK I", "West of House", "mailbox"]
       , specMinWords = 100
@@ -81,6 +86,7 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "zorks/minizork.z3"
+      , specVersion = 3
       , specKnownObjects = ["West of House"]
       , specIntro = ["West of House", "mailbox"]
       , specMinWords = 100
@@ -88,6 +94,26 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "advent/advent.z3"
+      , specVersion = 3
+      , specKnownObjects = []
+      , specIntro = []
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , -- Version 4 games open with a "press any key" (read_char), so the
+    -- save/restore roundtrip (which drives a command prompt) is skipped
+    -- by leaving the intro empty.
+    StorySpec
+      { specLocation = External "infocom/amfv.z4"
+      , specVersion = 4
+      , specKnownObjects = []
+      , specIntro = []
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , StorySpec
+      { specLocation = External "infocom/trinity.z4"
+      , specVersion = 4
       , specKnownObjects = []
       , specIntro = []
       , specMinWords = 100
@@ -885,6 +911,27 @@ interpTests =
         peekVar 16 vm @?= 0
     ]
 
+-- | The czech conformance suite, compiled to versions 3 and 4 and
+-- bundled with the repository, must run to completion with no failures.
+-- czech needs no input: it prints its results and quits.
+conformanceTests :: TestTree
+conformanceTests =
+  testGroup
+    "czech conformance"
+    [ czechCase "test/stories/czech.z3" 3 349
+    , czechCase "test/stories/czech.z4" 4 367
+    ]
+  where
+    czechCase path version passed = testCase path $ do
+      bytes <- BS.readFile path
+      zVersion (readHeader (fromStory bytes)) @?= version
+      let (out, stop, _) = run (boot bytes)
+      stop @?= Halted
+      let summary = "Passed: " <> T.pack (show passed) <> ", Failed: 0"
+      assertBool
+        ("expected " ++ show summary ++ " in czech output")
+        (summary `T.isInfixOf` out)
+
 -- | Checks against real story files found on this machine.
 storyTests :: [Story] -> TestTree
 storyTests stories =
@@ -898,8 +945,8 @@ storyTests stories =
         known = specKnownObjects spec
         intro = specIntro spec
         basicTests =
-          [ testCase "is version 3" $
-              zVersion (readHeader mem) @?= 3
+          [ testCase "reports its version" $
+              zVersion (readHeader mem) @?= specVersion spec
           , testCase "declared length fits the file" $
               assertBool "file length exceeds actual size" $
                 fileLength (readHeader mem) <= memorySize mem
@@ -945,7 +992,10 @@ storyTests stories =
                 ]
           , testCase "boots and runs to the first prompt" $ do
               let (out, stop, _) = run (boot (originalBytes mem))
-              stop @?= NeedInput
+              -- Version 4 games commonly pause first for a keypress.
+              assertBool
+                ("unexpected first stop: " ++ show stop)
+                (stop `elem` [NeedInput, NeedChar])
               assertBool "no output before the prompt" (not (T.null out))
               sequence_
                 [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)
