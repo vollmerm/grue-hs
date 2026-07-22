@@ -3,9 +3,9 @@
 -- An instruction is an opcode byte (giving the form, operand count and
 -- opcode number), operand type information, the operands themselves,
 -- and then, depending on the particular operation: a store variable, a
--- branch offset, and inline text.  This module decodes all of the
--- version 3 instruction set into a typed representation; execution is
--- left to the interpreter.
+-- branch offset, and inline text.  This module decodes the version 3 and
+-- 4 instruction sets into a typed representation; execution is left to
+-- the interpreter.
 module Grue.Instruction
   ( Op (..)
   , Operand (..)
@@ -25,7 +25,7 @@ import Grue.Header
 import Grue.Memory
 import Grue.ZString
 
--- | The version 3 operations.
+-- | The version 3 and 4 operations.
 data Op
   = -- 2OP
     Je

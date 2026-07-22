@@ -909,6 +909,21 @@ interpTests =
             (_, stop, vm) = run (bootProgVersion 4 [(64, code), (0x140, table)])
         stop @?= Halted
         peekVar 16 vm @?= 0
+    , testCase "version 4 splitting keeps the upper window" $ do
+        -- Unlike version 3, a version 4 screen split leaves the existing
+        -- upper-window contents in place, dropping only the rows the new
+        -- height no longer covers.
+        let prog =
+              concat
+                [ [0xea, 0x7f, 2] -- split_window 2
+                , [0xeb, 0x7f, 1] -- set_window 1
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xea, 0x7f, 1] -- split_window 1 again
+                , [0xba] -- quit
+                ]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, prog)])
+        stop @?= Halted
+        toList (upperLines (vmUpper vm)) @?= ["hi"]
     ]
 
 -- | The czech conformance suite, compiled to versions 3 and 4 and

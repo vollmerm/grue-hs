@@ -99,10 +99,11 @@ data PendingInput
   | PendingRestore Branch
   deriving (Eq, Show)
 
--- | The version 3 upper window: a fixed region of the screen below
--- the status line.  The story draws on it after selecting it with
--- @set_window@; printing overlays whatever is already there, and the
--- window never scrolls.
+-- | The upper window: a fixed region at the top of the screen the story
+-- draws on after selecting it with @set_window@.  In version 3 it sits
+-- below the interpreter's status line; from version 4 the game draws its
+-- own status region here instead.  Printing overlays whatever is already
+-- there, and the window never scrolls.
 data UpperWindow = UpperWindow
   { upperHeight :: Int
   -- ^ How many screen rows the window occupies.
@@ -180,10 +181,11 @@ boot story =
     baseFrame = Frame Seq.empty [] 0 0 0
 
 -- | Announce version 4 display capabilities in the header and record
--- the interpreter's identity and screen size.  Flags 1 advertises that
--- boldface, italic and a fixed-space font are available (bits 2 to 4);
--- the other capability bits stay clear, since colours, pictures, sound
--- and timed input are not provided.
+-- the interpreter's identity and screen size.  Flags 1 advertises only
+-- a fixed-space font (bit 4): the frontends print the upper window in a
+-- fixed-pitch font but do not render the bold, italic or reverse text
+-- styles, and colours, pictures, sound and timed input are likewise not
+-- provided.
 stampCapabilities :: Memory -> Memory
 stampCapabilities =
   pokeByte 0x01 0x10
@@ -287,10 +289,21 @@ takeTranscript vm =
   (T.concat (reverse (vmTranscript vm)), vm {vmTranscript = []})
 
 -- | Give the upper window a new height.  In version 3 a screen split
--- always clears the upper window to blanks.
+-- always clears the window to blanks; from version 4 the existing
+-- contents are kept, with rows added or dropped to match the new
+-- height, and the cursor left where it is unless the window has shrunk
+-- past it.
 splitUpper :: Int -> VM -> VM
-splitUpper n vm =
-  vm {vmUpper = UpperWindow n (0, 0) (Seq.replicate n T.empty)}
+splitUpper n vm
+  | zVersion (vmHeader vm) <= 3 =
+      vm {vmUpper = UpperWindow n (0, 0) (Seq.replicate n T.empty)}
+  | otherwise =
+      vm {vmUpper = UpperWindow n cursor (fit n (upperLines old))}
+  where
+    old = vmUpper vm
+    (row, col) = upperCursor old
+    cursor = if row < n then (row, col) else (0, 0)
+    fit h ls = Seq.take h (ls <> Seq.replicate h T.empty)
 
 -- | Select the window that receives output.  Whenever the upper
 -- window is selected, its cursor moves to the top left.
