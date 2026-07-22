@@ -1,0 +1,21 @@
+{
+  "name": "grue-hs",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "GHC_VERSION": "9.10.3",
+      "CABAL_VERSION": "3.12.1.0"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "haskell.manageHLS": "PATH"
+      },
+      "extensions": [
+        "haskell.haskell"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
