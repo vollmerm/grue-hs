@@ -399,13 +399,19 @@ exec (Instruction op operands st br text) = case op of
   EraseLine -> continue (void val1 >> modify eraseLine)
   OutputStream -> continue $ do
     vals <- values operands
-    case map signed vals of
-      (2 : _) -> modify (setTranscript True)
-      (3 : table : _) -> modify $ \vm ->
-        vm {vmTables = (table, 0) : vmTables vm}
-      (-2) : _ -> modify (setTranscript False)
-      (-3) : _ -> modify closeTable
-      _ -> pure ()
+    case vals of
+      (n : rest) -> case signed n of
+        2 -> modify (setTranscript True)
+        (-2) -> modify (setTranscript False)
+        -- The table is an unsigned byte address; it may sit above
+        -- 0x8000 in a large story's dynamic memory.
+        3 -> case rest of
+          (table : _) -> modify $ \vm ->
+            vm {vmTables = (fromIntegral table, 0) : vmTables vm}
+          [] -> pure ()
+        (-3) -> modify closeTable
+        _ -> pure ()
+      [] -> pure ()
   InputStream -> continue (void (values operands))
   SoundEffect -> continue $ do
     vals <- values operands

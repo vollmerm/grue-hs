@@ -186,7 +186,7 @@ boot story =
 -- and timed input are not provided.
 stampCapabilities :: Memory -> Memory
 stampCapabilities =
-  pokeByte 0x01 0x1c
+  pokeByte 0x01 0x10
     . pokeByte 0x1e 6 -- interpreter number: IBM PC
     . pokeByte 0x1f 0x41 -- interpreter version: 'A'
     . pokeByte 0x20 25 -- screen height in lines
