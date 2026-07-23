@@ -1,8 +1,8 @@
 # grue-hs
 
-A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). This interpreter targets version 3 of the format, which covers much of the Infocom catalog.
+A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). This interpreter targets version 4 of the format, which covers much of the Infocom catalog.
 
-The core opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work, but the implementation hasn't been fully tested yet. Support for Z-machine versions beyond 3 is planned but not implemented yet.
+The core opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work, but the implementation hasn't been fully tested yet. Support for Z-machine versions beyond 4 is planned but not implemented.
 
 ## Building
 
