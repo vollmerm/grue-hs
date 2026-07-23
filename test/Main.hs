@@ -38,6 +38,7 @@ tests stories =
     , objectTests
     , instructionTests
     , interpTests
+    , conformanceTests
     , storyTests stories
     ]
 
@@ -47,6 +48,8 @@ tests stories =
 -- external collection (see 'storyRoot') and skipped when absent.
 data StorySpec = StorySpec
   { specLocation :: StoryLocation
+  , specVersion :: Int
+  -- ^ The Z-machine version the story file should report.
   , specKnownObjects :: [T.Text]
   -- ^ Object names that must appear in the object table.
   , specIntro :: [T.Text]
@@ -67,6 +70,7 @@ storySpecs :: [StorySpec]
 storySpecs =
   [ StorySpec
       { specLocation = Bundled "test/stories/cloak.z3"
+      , specVersion = 3
       , specKnownObjects = ["Foyer of the Opera House", "small brass hook"]
       , specIntro = ["Cloak of Darkness", "Foyer of the Opera House"]
       , specMinWords = 100
@@ -74,6 +78,7 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "zorks/zork1.z3"
+      , specVersion = 3
       , specKnownObjects = ["West of House", "brass lantern"]
       , specIntro = ["ZORK I", "West of House", "mailbox"]
       , specMinWords = 100
@@ -81,6 +86,7 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "zorks/minizork.z3"
+      , specVersion = 3
       , specKnownObjects = ["West of House"]
       , specIntro = ["West of House", "mailbox"]
       , specMinWords = 100
@@ -88,6 +94,26 @@ storySpecs =
       }
   , StorySpec
       { specLocation = External "advent/advent.z3"
+      , specVersion = 3
+      , specKnownObjects = []
+      , specIntro = []
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , -- Version 4 games open with a "press any key" (read_char), so the
+    -- save/restore roundtrip (which drives a command prompt) is skipped
+    -- by leaving the intro empty.
+    StorySpec
+      { specLocation = External "infocom/amfv.z4"
+      , specVersion = 4
+      , specKnownObjects = []
+      , specIntro = []
+      , specMinWords = 100
+      , specMinObjects = 50
+      }
+  , StorySpec
+      { specLocation = External "infocom/trinity.z4"
+      , specVersion = 4
       , specKnownObjects = []
       , specIntro = []
       , specMinWords = 100
@@ -170,9 +196,14 @@ memoryTests =
 -- the given word fields poked in, followed by a payload starting at
 -- address 64.
 mkStory :: [(Int, Word16)] -> [Word8] -> Memory
-mkStory fields payload = foldr (uncurry pokeWord) versioned fields
+mkStory = mkStoryVersion 3
+
+-- | Build a story of a given version from header field overrides and a
+-- payload placed just after the 64-byte header.
+mkStoryVersion :: Word8 -> [(Int, Word16)] -> [Word8] -> Memory
+mkStoryVersion version fields payload = foldr (uncurry pokeWord) versioned fields
   where
-    versioned = pokeByte 0 3 blank
+    versioned = pokeByte 0 version blank
     blank = fromStory (BS.pack (replicate 64 0 ++ payload))
 
 -- | The synthetic story used by the header tests, with distinctive
@@ -400,9 +431,9 @@ objectTests =
         Obj.propertyAddr objStory hdr 1 18 @?= 157
         Obj.propertyAddr objStory hdr 1 4 @?= 160
         Obj.propertyAddr objStory hdr 1 5 @?= 0
-        Obj.propertyLen objStory 157 @?= 2
-        Obj.propertyLen objStory 160 @?= 1
-        Obj.propertyLen objStory 0 @?= 0
+        Obj.propertyLen objStory hdr 157 @?= 2
+        Obj.propertyLen objStory hdr 160 @?= 1
+        Obj.propertyLen objStory hdr 0 @?= 0
     , testCase "walks the property list in order" $ do
         let hdr = readHeader objStory
         Obj.nextProperty objStory hdr 1 0 @?= 18
@@ -431,14 +462,93 @@ objectTests =
         Obj.sibling mem hdr 2 @?= 0
     , testCase "counts the objects" $
         Obj.objectCount objStory (readHeader objStory) @?= 3
+    , testGroup "version 4 layout" objectV4Cases
     ]
+
+-- | A version 4 story with the same three-object tree as 'objStory',
+-- exercising the wider v4 layout: 14-byte entries with word-sized links
+-- and 48 attributes, a 63-word defaults table, and the one- and
+-- two-byte property size encodings.  Object 1 provides properties 20
+-- (three bytes, stored with two size bytes), 18 (a word) and 4 (a
+-- byte); the defaults table gives property 5 the value 0xab.
+objStoryV4 :: Memory
+objStoryV4 = mkStoryVersion 4 [(0x0a, 64), (72, 0x00ab)] payload
+  where
+    defaults = replicate 126 0
+    entry (par, sib, chi, props) =
+      replicate 6 0 ++ concatMap wordBytes [par, sib, chi, props]
+    entries =
+      concatMap
+        entry
+        [ (0, 0, 2, 232) -- object 1
+        , (1, 3, 0, 246) -- object 2
+        , (1, 0, 0, 248) -- object 3
+        ]
+    propTable1 =
+      [1, 0x9e, 0x9d] -- short name "box"
+        ++ [0x94, 0xc3, 0x11, 0x22, 0x33] -- property 20, three bytes (two size bytes)
+        ++ [0x52, 0xca, 0xfe] -- property 18, a word
+        ++ [4, 7] -- property 4, a byte
+        ++ [0]
+    propTable2 = [0, 0]
+    propTable3 = [0, 0]
+    payload = defaults ++ entries ++ propTable1 ++ propTable2 ++ propTable3
+
+objectV4Cases :: [TestTree]
+objectV4Cases =
+  [ testCase "reads word-sized tree links" $ do
+      let hdr = readHeader objStoryV4
+      Obj.parent objStoryV4 hdr 2 @?= 1
+      Obj.sibling objStoryV4 hdr 2 @?= 3
+      Obj.child objStoryV4 hdr 1 @?= 2
+      Obj.parent objStoryV4 hdr 1 @?= 0
+  , testCase "attributes span 48 flags" $ do
+      let hdr = readHeader objStoryV4
+      Obj.testAttr objStoryV4 hdr 1 47 @?= False
+      let mem1 = Obj.setAttr hdr 1 47 objStoryV4
+      Obj.testAttr mem1 hdr 1 47 @?= True
+      peekByte mem1 (64 + 126 + 5) @?= 0x01
+      let mem2 = Obj.setAttr hdr 1 0 mem1
+      peekByte mem2 (64 + 126) @?= 0x80
+  , testCase "reads short names" $ do
+      let hdr = readHeader objStoryV4
+      Obj.shortName objStoryV4 hdr 1 @?= "box"
+      Obj.shortName objStoryV4 hdr 2 @?= ""
+  , testCase "property values across both size encodings" $ do
+      let hdr = readHeader objStoryV4
+      Obj.propertyValue objStoryV4 hdr 1 20 @?= 0x1122
+      Obj.propertyValue objStoryV4 hdr 1 18 @?= 0xcafe
+      Obj.propertyValue objStoryV4 hdr 1 4 @?= 7
+      Obj.propertyValue objStoryV4 hdr 1 5 @?= 0x00ab
+      Obj.propertyValue objStoryV4 hdr 1 1 @?= 0
+  , testCase "property addresses and lengths" $ do
+      let hdr = readHeader objStoryV4
+      Obj.propertyAddr objStoryV4 hdr 1 20 @?= 237
+      Obj.propertyAddr objStoryV4 hdr 1 18 @?= 241
+      Obj.propertyAddr objStoryV4 hdr 1 4 @?= 244
+      Obj.propertyLen objStoryV4 hdr 237 @?= 3
+      Obj.propertyLen objStoryV4 hdr 241 @?= 2
+      Obj.propertyLen objStoryV4 hdr 244 @?= 1
+  , testCase "walks the property list in descending order" $ do
+      let hdr = readHeader objStoryV4
+      Obj.nextProperty objStoryV4 hdr 1 0 @?= 20
+      Obj.nextProperty objStoryV4 hdr 1 20 @?= 18
+      Obj.nextProperty objStoryV4 hdr 1 18 @?= 4
+      Obj.nextProperty objStoryV4 hdr 1 4 @?= 0
+  , testCase "counts the objects" $
+      Obj.objectCount objStoryV4 (readHeader objStoryV4) @?= 3
+  ]
 
 -- | Decode the instruction assembled from the given bytes, placed at
 -- address 64 of an otherwise empty story.
 decodeAt :: [Word8] -> (Instruction, Int)
-decodeAt bytes = decode mem (readHeader mem) 64
+decodeAt = decodeAtVersion 3
+
+-- | Decode an instruction in a story of the given version.
+decodeAtVersion :: Word8 -> [Word8] -> (Instruction, Int)
+decodeAtVersion version bytes = decode mem (readHeader mem) 64
   where
-    mem = mkStory [] bytes
+    mem = mkStoryVersion version [] bytes
 
 instructionTests :: TestTree
 instructionTests =
@@ -514,15 +624,58 @@ instructionTests =
                   Nothing
               , 68
               )
+    , testGroup "version 4 opcodes" instructionV4Cases
     ]
+
+instructionV4Cases :: [TestTree]
+instructionV4Cases =
+  [ testCase "call_1s stores its result" $
+      decodeAtVersion 4 [0x98, 0x12, 0x03]
+        @?= (Instruction Call1s [SmallConst 0x12] (Just 3) Nothing Nothing, 67)
+  , testCase "call_2s stores its result" $
+      decodeAtVersion 4 [0x19, 0x0a, 0x0b, 0x04]
+        @?= ( Instruction
+                Call2s
+                [SmallConst 0x0a, SmallConst 0x0b]
+                (Just 4)
+                Nothing
+                Nothing
+            , 68
+            )
+  , testCase "call_vs2 reads two type bytes for up to eight operands" $
+      decodeAtVersion 4 [0xec, 0x55, 0x7f, 1, 2, 3, 4, 5, 0x06]
+        @?= ( Instruction
+                CallVs2
+                (map SmallConst [1, 2, 3, 4, 5])
+                (Just 6)
+                Nothing
+                Nothing
+            , 73
+            )
+  , testCase "scan_table both stores and branches" $
+      decodeAtVersion 4 [0xf7, 0x57, 0x05, 0x40, 0x03, 0x07, 0xc5]
+        @?= ( Instruction
+                ScanTable
+                [SmallConst 5, SmallConst 0x40, SmallConst 3]
+                (Just 7)
+                (Just (Branch True 70 (BranchAddr 74)))
+                Nothing
+            , 71
+            )
+  ]
 
 -- | Boot a story assembled from segments of bytes at absolute
 -- addresses.  The header points the program counter at 64, the
 -- dictionary at 0x100, and the globals at 0x130.
 bootProg :: [(Int, [Word8])] -> VM
-bootProg segments = boot flattened
+bootProg = bootProgVersion 3
+
+-- | Like 'bootProg', but for a story of the given version.
+bootProgVersion :: Word8 -> [(Int, [Word8])] -> VM
+bootProgVersion version segments = boot flattened
   where
-    mem0 = mkStory [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
+    mem0 =
+      mkStoryVersion version [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
     place (addr, bytes) m =
       foldr (\(i, b) -> pokeByte i b) m (zip [addr ..] bytes)
     mem = foldr place mem0 segments
@@ -742,7 +895,57 @@ interpTests =
         peekWord mem 0x1c6 @?= 0
         peekByte mem 0x1c8 @?= 4
         peekByte mem 0x1c9 @?= 5
+    , testCase "scan_table finds a matching word and stores its address" $ do
+        let table = concatMap wordBytes [10, 20, 30]
+            -- scan_table 20 0x140 3 -> G0 ?(next); quit
+            code = [0xf7, 0x03, 0x00, 0x14, 0x01, 0x40, 0x00, 0x03, 0x10, 0xc2, 0xba]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, code), (0x140, table)])
+        stop @?= Halted
+        peekVar 16 vm @?= 0x142
+    , testCase "scan_table reports a miss as zero" $ do
+        let table = concatMap wordBytes [10, 20, 30]
+            -- scan_table 99 0x140 3 -> G0 ?(next); quit
+            code = [0xf7, 0x03, 0x00, 0x63, 0x01, 0x40, 0x00, 0x03, 0x10, 0xc2, 0xba]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, code), (0x140, table)])
+        stop @?= Halted
+        peekVar 16 vm @?= 0
+    , testCase "version 4 splitting keeps the upper window" $ do
+        -- Unlike version 3, a version 4 screen split leaves the existing
+        -- upper-window contents in place, dropping only the rows the new
+        -- height no longer covers.
+        let prog =
+              concat
+                [ [0xea, 0x7f, 2] -- split_window 2
+                , [0xeb, 0x7f, 1] -- set_window 1
+                , [0xb2, 0xb5, 0xc5] -- print "hi"
+                , [0xea, 0x7f, 1] -- split_window 1 again
+                , [0xba] -- quit
+                ]
+            (_, stop, vm) = run (bootProgVersion 4 [(64, prog)])
+        stop @?= Halted
+        toList (upperLines (vmUpper vm)) @?= ["hi"]
     ]
+
+-- | The czech conformance suite, compiled to versions 3 and 4 and
+-- bundled with the repository, must run to completion with no failures.
+-- czech needs no input: it prints its results and quits.
+conformanceTests :: TestTree
+conformanceTests =
+  testGroup
+    "czech conformance"
+    [ czechCase "test/stories/czech.z3" 3 349
+    , czechCase "test/stories/czech.z4" 4 367
+    ]
+  where
+    czechCase path version passed = testCase path $ do
+      bytes <- BS.readFile path
+      zVersion (readHeader (fromStory bytes)) @?= version
+      let (out, stop, _) = run (boot bytes)
+      stop @?= Halted
+      let summary = "Passed: " <> T.pack (show passed) <> ", Failed: 0"
+      assertBool
+        ("expected " ++ show summary ++ " in czech output")
+        (summary `T.isInfixOf` out)
 
 -- | Checks against real story files found on this machine.
 storyTests :: [Story] -> TestTree
@@ -757,8 +960,8 @@ storyTests stories =
         known = specKnownObjects spec
         intro = specIntro spec
         basicTests =
-          [ testCase "is version 3" $
-              zVersion (readHeader mem) @?= 3
+          [ testCase "reports its version" $
+              zVersion (readHeader mem) @?= specVersion spec
           , testCase "declared length fits the file" $
               assertBool "file length exceeds actual size" $
                 fileLength (readHeader mem) <= memorySize mem
@@ -804,7 +1007,10 @@ storyTests stories =
                 ]
           , testCase "boots and runs to the first prompt" $ do
               let (out, stop, _) = run (boot (originalBytes mem))
-              stop @?= NeedInput
+              -- Version 4 games commonly pause first for a keypress.
+              assertBool
+                ("unexpected first stop: " ++ show stop)
+                (stop `elem` [NeedInput, NeedChar])
               assertBool "no output before the prompt" (not (T.null out))
               sequence_
                 [ assertBool (T.unpack s ++ " missing") (s `T.isInfixOf` out)

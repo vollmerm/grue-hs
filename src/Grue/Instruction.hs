@@ -3,9 +3,9 @@
 -- An instruction is an opcode byte (giving the form, operand count and
 -- opcode number), operand type information, the operands themselves,
 -- and then, depending on the particular operation: a store variable, a
--- branch offset, and inline text.  This module decodes all of the
--- version 3 instruction set into a typed representation; execution is
--- left to the interpreter.
+-- branch offset, and inline text.  This module decodes the version 3 and
+-- 4 instruction sets into a typed representation; execution is left to
+-- the interpreter.
 module Grue.Instruction
   ( Op (..)
   , Operand (..)
@@ -25,7 +25,7 @@ import Grue.Header
 import Grue.Memory
 import Grue.ZString
 
--- | The version 3 operations.
+-- | The version 3 and 4 operations.
 data Op
   = -- 2OP
     Je
@@ -52,6 +52,7 @@ data Op
   | Mul
   | Div
   | Mod
+  | Call2s
   | -- 1OP
     Jz
   | GetSibling
@@ -68,6 +69,7 @@ data Op
   | PrintPaddr
   | Load
   | Not
+  | Call1s
   | -- 0OP
     Rtrue
   | Rfalse
@@ -99,6 +101,15 @@ data Op
   | OutputStream
   | InputStream
   | SoundEffect
+  | CallVs2
+  | EraseWindow
+  | EraseLine
+  | SetCursor
+  | GetCursor
+  | SetTextStyle
+  | BufferMode
+  | ReadChar
+  | ScanTable
   deriving (Eq, Show)
 
 -- | A decoded operand.  Variable operands are resolved to values at
@@ -141,9 +152,10 @@ data Instruction = Instruction
 data OpCount = Count0 | Count1 | Count2 | CountVar
   deriving (Eq, Show)
 
--- | Look up an operation by operand count and opcode number.
-lookupOp :: OpCount -> Int -> Maybe Op
-lookupOp Count2 n = case n of
+-- | Look up an operation by version, operand count and opcode number.
+-- Some opcode numbers only became meaningful in version 4.
+lookupOp :: Int -> OpCount -> Int -> Maybe Op
+lookupOp v Count2 n = case n of
   1 -> Just Je
   2 -> Just Jl
   3 -> Just Jg
@@ -168,8 +180,9 @@ lookupOp Count2 n = case n of
   22 -> Just Mul
   23 -> Just Div
   24 -> Just Mod
+  25 | v >= 4 -> Just Call2s
   _ -> Nothing
-lookupOp Count1 n = case n of
+lookupOp v Count1 n = case n of
   0 -> Just Jz
   1 -> Just GetSibling
   2 -> Just GetChild
@@ -178,6 +191,7 @@ lookupOp Count1 n = case n of
   5 -> Just Inc
   6 -> Just Dec
   7 -> Just PrintAddr
+  8 | v >= 4 -> Just Call1s
   9 -> Just RemoveObj
   10 -> Just PrintObj
   11 -> Just Ret
@@ -186,7 +200,7 @@ lookupOp Count1 n = case n of
   14 -> Just Load
   15 -> Just Not
   _ -> Nothing
-lookupOp Count0 n = case n of
+lookupOp _ Count0 n = case n of
   0 -> Just Rtrue
   1 -> Just Rfalse
   2 -> Just Print
@@ -202,7 +216,7 @@ lookupOp Count0 n = case n of
   12 -> Just ShowStatus
   13 -> Just Verify
   _ -> Nothing
-lookupOp CountVar n = case n of
+lookupOp v CountVar n = case n of
   0 -> Just Call
   1 -> Just Storew
   2 -> Just Storeb
@@ -215,9 +229,18 @@ lookupOp CountVar n = case n of
   9 -> Just Pull
   10 -> Just SplitWindow
   11 -> Just SetWindow
+  12 | v >= 4 -> Just CallVs2
+  13 | v >= 4 -> Just EraseWindow
+  14 | v >= 4 -> Just EraseLine
+  15 | v >= 4 -> Just SetCursor
+  16 | v >= 4 -> Just GetCursor
+  17 | v >= 4 -> Just SetTextStyle
+  18 | v >= 4 -> Just BufferMode
   19 -> Just OutputStream
   20 -> Just InputStream
   21 -> Just SoundEffect
+  22 | v >= 4 -> Just ReadChar
+  23 | v >= 4 -> Just ScanTable
   _ -> Nothing
 
 -- | Whether an operation is followed by a store variable byte.
@@ -243,7 +266,12 @@ storesResult op =
            , Load
            , Not
            , Call
+           , Call1s
+           , Call2s
+           , CallVs2
            , Random
+           , ReadChar
+           , ScanTable
            ]
 
 -- | Whether an operation is followed by branch information.
@@ -264,6 +292,7 @@ takesBranch op =
            , Save
            , Restore
            , Verify
+           , ScanTable
            ]
 
 -- | Whether an operation is followed by inline text.
@@ -281,12 +310,21 @@ decode mem hdr pc0 = (inst, pcText)
     (count, opNum, operandSpec, pcOperands) = case opByte of
       b
         | b >= 0xc0 ->
-            -- Variable form: a type byte follows the opcode.
-            ( if testBit b 5 then CountVar else Count2
-            , fromIntegral (b .&. 31)
-            , typeByteOperands (peekByte mem (pc0 + 1))
-            , pc0 + 2
-            )
+            -- Variable form: one type byte follows the opcode, or two
+            -- for the "double variable" call, which takes up to eight
+            -- operands.
+            let num = fromIntegral (b .&. 31)
+                double = testBit b 5 && num == 12
+                types
+                  | double =
+                      typeBits (peekByte mem (pc0 + 1))
+                        ++ typeBits (peekByte mem (pc0 + 2))
+                  | otherwise = typeBits (peekByte mem (pc0 + 1))
+             in ( if testBit b 5 then CountVar else Count2
+                , num
+                , takeWhile (/= 3) types
+                , if double then pc0 + 3 else pc0 + 2
+                )
         | b >= 0x80 ->
             -- Short form: bits 4 and 5 give the single operand's type
             -- (11 meaning no operand at all).
@@ -304,7 +342,7 @@ decode mem hdr pc0 = (inst, pcText)
 
     longType var = if var then 2 else 1
 
-    op = case lookupOp count opNum of
+    op = case lookupOp (zVersion hdr) count opNum of
       Just o -> o
       Nothing ->
         error
@@ -335,10 +373,9 @@ decode mem hdr pc0 = (inst, pcText)
 
     inst = Instruction op operands store branch text
 
-    -- The 2-bit fields of a variable-form type byte, most significant
-    -- first, up to the first "omitted".
-    typeByteOperands tb =
-      takeWhile (/= 3) [fromIntegral (tb `shiftR` s) .&. 3 | s <- [6, 4, 2, 0]]
+    -- The four 2-bit type fields of a variable-form type byte, most
+    -- significant first.  A type of 3 marks an omitted operand.
+    typeBits tb = [fromIntegral (tb `shiftR` s) .&. 3 | s <- [6, 4, 2, 0]]
 
     readOperands [] pc = ([], pc)
     readOperands (t : ts) pc = (operand : rest, end)
