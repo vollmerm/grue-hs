@@ -7,6 +7,7 @@ import Data.Bits (testBit)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.List (sort)
+import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
@@ -668,6 +669,57 @@ instructionV4Cases =
                 Nothing
             , 71
             )
+  , testGroup "version 5 opcodes" instructionV5Cases
+  ]
+
+instructionV5Cases :: [TestTree]
+instructionV5Cases =
+  [ testCase "call_1n discards its result" $
+      decodeAtVersion 5 [0x9f, 0x12]
+        @?= (Instruction Call1n [SmallConst 0x12] Nothing Nothing Nothing, 66)
+  , testCase "call_2n discards its result" $
+      decodeAtVersion 5 [0x1a, 0x0a, 0x0b]
+        @?= ( Instruction
+                Call2n
+                [SmallConst 0x0a, SmallConst 0x0b]
+                Nothing
+                Nothing
+                Nothing
+            , 67
+            )
+  , testCase "version 5 not uses the variable form" $
+      decodeAtVersion 5 [0xf8, 0x7f, 0x12, 0x03]
+        @?= (Instruction Not [SmallConst 0x12] (Just 3) Nothing Nothing, 68)
+  , testCase "call_vn discards its result" $
+      decodeAtVersion 5 [0xf9, 0x5f, 1, 2]
+        @?= ( Instruction
+                CallVn
+                [SmallConst 1, SmallConst 2]
+                Nothing
+                Nothing
+                Nothing
+            , 68
+            )
+  , testCase "call_vn2 reads two type bytes and discards its result" $
+      decodeAtVersion 5 [0xfa, 0x55, 0x7f, 1, 2, 3, 4, 5]
+        @?= ( Instruction
+                CallVn2
+                (map SmallConst [1, 2, 3, 4, 5])
+                Nothing
+                Nothing
+                Nothing
+            , 72
+            )
+  , testCase "extended form decodes art_shift" $
+      decodeAtVersion 5 [0xbe, 0x03, 0x5f, 0x10, 0x02, 0x07]
+        @?= ( Instruction
+                ArtShift
+                [SmallConst 0x10, SmallConst 0x02]
+                (Just 7)
+                Nothing
+                Nothing
+            , 70
+            )
   ]
 
 -- | Boot a story assembled from segments of bytes at absolute
@@ -683,6 +735,14 @@ bootProgVersion version = boot . progImage version
 -- | Like 'bootProg', but with an explicit random seed.
 bootProgSeeded :: Word64 -> [(Int, [Word8])] -> VM
 bootProgSeeded seed = bootWithSeed seed . progImage 3
+
+runProgVersion :: Word8 -> [Word8] -> (T.Text, Stop)
+runProgVersion version code = (out, stop)
+  where
+    (out, stop, _) = runProgVMVersion version code
+
+runProgVMVersion :: Word8 -> [Word8] -> (T.Text, Stop, VM)
+runProgVMVersion version code = run (bootProgVersion version [(64, code)])
 
 -- | The flattened story image for a set of code segments.
 progImage :: Word8 -> [(Int, [Word8])] -> BS.ByteString
@@ -732,6 +792,18 @@ interpTests =
             routine = [0x01, 0x00, 0x05, 0xab, 0x01]
             (out, stop, _) = run (bootProg [(64, main'), (74, routine)])
         (out, stop) @?= ("9", Halted)
+    , testCase "call_1n leaves no discarded result on the stack" $ do
+        let main' = [0x9f, 0x25, 0xba]
+            routine = [0x00, 0xe6, 0x7f, 7, 0x9b, 1]
+            (_, stop, vm) = run (bootProgVersion 5 [(64, main'), (148, routine)])
+        stop @?= Halted
+        frameEval (NE.head (vmFrames vm)) @?= []
+    , testCase "call_vn2 leaves no discarded result on the stack" $ do
+        let main' = [0xfa, 0x1f, 0xff, 0x00, 0x25, 7, 0xba]
+            routine = [0x00, 0xe6, 0x7f, 9, 0x9b, 1]
+            (_, stop, vm) = run (bootProgVersion 5 [(64, main'), (148, routine)])
+        stop @?= Halted
+        frameEval (NE.head (vmFrames vm)) @?= []
     , testCase "a taken branch skips ahead" $
         runProg [0x03, 5, 3, 0xc5, 0xe6, 0x7f, 1, 0xe6, 0x7f, 2, 0xba]
           @?= ("2", Halted)
@@ -764,6 +836,12 @@ interpTests =
         stop @?= Halted
         assertBool ("out of range: " ++ T.unpack out) $
           out `elem` ["1", "2", "3"]
+    , testCase "log_shift shifts right logically" $
+        runProgVersion 5 [0xbe, 0x02, 0x0f, 0xff, 0xff, 0xff, 0xfc, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+          @?= ("4095", Halted)
+    , testCase "art_shift preserves the sign bit" $
+        runProgVersion 5 [0xbe, 0x03, 0x0f, 0xff, 0xff, 0xff, 0xfc, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+          @?= ("-1", Halted)
     , testCase "output stream 3 redirects into memory" $ do
         -- Select a table at 0x180, print "hi" (redirected), deselect,
         -- then print "hi" again to the screen.

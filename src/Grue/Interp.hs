@@ -20,9 +20,9 @@ module Grue.Interp
   , statusLine
   ) where
 
-import Control.Monad (void)
+import Control.Monad (unless, void)
 import Control.Monad.State
-import Data.Bits (complement, testBit, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.Char (toLower)
 import Data.Int (Int16)
@@ -114,13 +114,15 @@ returnValue w = do
     _ :| [] -> error "Grue.Interp: return from the top level"
     f :| (g : rest) -> do
       put vm {vmFrames = g :| rest, vmPC = frameReturnPC f}
-      modify (writeVar (frameStore f) w)
+      unless (frameDiscardResult f) $
+        modify (writeVar (frameStore f) w)
 
 -- | Call a routine.  Calling address 0 is legal and simply produces
 -- the result 0.
-callRoutine :: Word16 -> [Word16] -> Maybe Word8 -> Z ()
-callRoutine 0 _ st = storeTo st 0
-callRoutine packed args st = do
+callRoutine :: Word16 -> [Word16] -> Maybe Word8 -> Bool -> Z ()
+callRoutine 0 _ st False = storeTo st 0
+callRoutine 0 _ _ True = pure ()
+callRoutine packed args st discard = do
   vm <- get
   let mem = vmMemory vm
       hdr = vmHeader vm
@@ -133,6 +135,7 @@ callRoutine packed args st = do
           { frameLocals = Seq.fromList locals
           , frameEval = []
           , frameReturnPC = vmPC vm
+          , frameDiscardResult = discard
           , frameStore = fromMaybe 0 st
           , frameArgs = length args
           }
@@ -178,6 +181,8 @@ exec (Instruction op operands st br text) = case op of
   Jl -> branch2 $ \a b -> pure (signed a < signed b)
   Jg -> branch2 $ \a b -> pure (signed a > signed b)
   Jz -> branch1 $ \a -> pure (a == 0)
+  CheckArgCount -> branch1 $ \n ->
+    gets (\vm -> fromIntegral n <= frameArgs (NE.head (vmFrames vm)))
   Jin -> branch2 $ \a b ->
     withWorld (\mem hdr -> Obj.parent mem hdr (obj a) == obj b)
   Test -> branch2 $ \bitmap flags -> pure (bitmap .&. flags == flags)
@@ -324,8 +329,12 @@ exec (Instruction op operands st br text) = case op of
   -- Control
   Call -> doCall
   Call1s -> doCall
+  Call1n -> doCallDiscard
   Call2s -> doCall
+  Call2n -> doCallDiscard
   CallVs2 -> doCall
+  CallVn -> doCallDiscard
+  CallVn2 -> doCallDiscard
   Ret -> continue $ do
     v <- val1
     returnValue v
@@ -348,6 +357,12 @@ exec (Instruction op operands st br text) = case op of
       EQ -> do
         modify (\vm -> vm {vmRng = advance (vmRng vm)})
         storeTo st 0
+  LogShift -> continue $ do
+    (n, places) <- val2
+    storeTo st (shiftLogical n (signed places))
+  ArtShift -> continue $ do
+    (n, places) <- val2
+    storeTo st (unsigned (shiftArithmetic (signed n) (signed places)))
   -- Input.  From version 4 read also accepts optional time and routine
   -- operands for timed input, which are ignored here.
   Sread -> do
@@ -394,6 +409,7 @@ exec (Instruction op operands st br text) = case op of
           . pokeWord (fromIntegral arr + 2) (fromIntegral col)
       )
   SetTextStyle -> continue (val1 >>= modify . setTextStyle . fromIntegral)
+  SetColour -> continue (void (values operands))
   BufferMode -> continue (val1 >>= modify . setBufferMode . (/= 0))
   EraseWindow -> continue (val1 >>= modify . eraseWindow . signed)
   EraseLine -> continue (void val1 >> modify eraseLine)
@@ -426,7 +442,13 @@ exec (Instruction op operands st br text) = case op of
     doCall = continue $ do
       vals <- values operands
       case vals of
-        (routine : args) -> callRoutine routine args st
+        (routine : args) -> callRoutine routine args st False
+        [] -> error "Grue.Interp: call with no operands"
+
+    doCallDiscard = continue $ do
+      vals <- values operands
+      case vals of
+        (routine : args) -> callRoutine routine args Nothing True
         [] -> error "Grue.Interp: call with no operands"
 
     val1 = values operands >>= expect1
@@ -485,6 +507,14 @@ exec (Instruction op operands st br text) = case op of
        in (v, pokeVar n v vm)
 
     advance rng = snd (nextRandom 1 rng)
+
+    shiftLogical n places
+      | places >= 0 = unsigned (fromIntegral n `shiftL` places)
+      | otherwise = n `shiftR` negate places
+
+    shiftArithmetic n places
+      | places >= 0 = n `shiftL` places
+      | otherwise = n `div` (2 ^ negate places)
 
 -- | Report whether the requested save was written.  The story sees
 -- the outcome through the @save@ instruction's branch.

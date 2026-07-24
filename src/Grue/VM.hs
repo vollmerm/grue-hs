@@ -76,6 +76,8 @@ data Frame = Frame
   -- ^ This routine's portion of the evaluation stack, topmost first.
   , frameReturnPC :: Int
   -- ^ Where execution resumes after this routine returns.
+  , frameDiscardResult :: Bool
+  -- ^ Whether the caller discards the routine's return value.
   , frameStore :: Word8
   -- ^ The variable that receives this routine's return value.
   , frameArgs :: Int
@@ -188,7 +190,7 @@ bootWithSeed seed story =
           pokeByte 0x01 (peekByte loaded 0x01 .|. 0x20) loaded
       | otherwise = stampCapabilities loaded
     hdr = readHeader mem
-    baseFrame = Frame Seq.empty [] 0 0 0
+    baseFrame = Frame Seq.empty [] 0 False 0 0
 
 -- | Announce version 4 display capabilities in the header and record
 -- the interpreter's identity and screen size.  Flags 1 advertises only

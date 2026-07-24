@@ -3,8 +3,8 @@
 -- An instruction is an opcode byte (giving the form, operand count and
 -- opcode number), operand type information, the operands themselves,
 -- and then, depending on the particular operation: a store variable, a
--- branch offset, and inline text.  This module decodes the version 3 and
--- 4 instruction sets into a typed representation; execution is left to
+-- branch offset, and inline text.  This module decodes the version 3 to
+-- 5 instruction sets into a typed representation; execution is left to
 -- the interpreter.
 module Grue.Instruction
   ( Op (..)
@@ -25,7 +25,7 @@ import Grue.Header
 import Grue.Memory
 import Grue.ZString
 
--- | The version 3 and 4 operations.
+-- | The version 3 to 5 operations.
 data Op
   = -- 2OP
     Je
@@ -53,6 +53,8 @@ data Op
   | Div
   | Mod
   | Call2s
+  | Call2n
+  | SetColour
   | -- 1OP
     Jz
   | GetSibling
@@ -70,6 +72,7 @@ data Op
   | Load
   | Not
   | Call1s
+  | Call1n
   | -- 0OP
     Rtrue
   | Rfalse
@@ -102,6 +105,8 @@ data Op
   | InputStream
   | SoundEffect
   | CallVs2
+  | CallVn
+  | CallVn2
   | EraseWindow
   | EraseLine
   | SetCursor
@@ -110,6 +115,10 @@ data Op
   | BufferMode
   | ReadChar
   | ScanTable
+  | CheckArgCount
+  | -- EXT
+    LogShift
+  | ArtShift
   deriving (Eq, Show)
 
 -- | A decoded operand.  Variable operands are resolved to values at
@@ -149,7 +158,7 @@ data Instruction = Instruction
   deriving (Eq, Show)
 
 -- | The number of operands an opcode form declares.
-data OpCount = Count0 | Count1 | Count2 | CountVar
+data OpCount = Count0 | Count1 | Count2 | CountVar | CountExt
   deriving (Eq, Show)
 
 -- | Look up an operation by version, operand count and opcode number.
@@ -181,6 +190,8 @@ lookupOp v Count2 n = case n of
   23 -> Just Div
   24 -> Just Mod
   25 | v >= 4 -> Just Call2s
+  26 | v >= 5 -> Just Call2n
+  27 | v >= 5 -> Just SetColour
   _ -> Nothing
 lookupOp v Count1 n = case n of
   0 -> Just Jz
@@ -198,7 +209,9 @@ lookupOp v Count1 n = case n of
   12 -> Just Jump
   13 -> Just PrintPaddr
   14 -> Just Load
-  15 -> Just Not
+  15
+    | v >= 5 -> Just Call1n
+    | otherwise -> Just Not
   _ -> Nothing
 lookupOp _ Count0 n = case n of
   0 -> Just Rtrue
@@ -241,6 +254,14 @@ lookupOp v CountVar n = case n of
   21 -> Just SoundEffect
   22 | v >= 4 -> Just ReadChar
   23 | v >= 4 -> Just ScanTable
+  24 | v >= 5 -> Just Not
+  25 | v >= 5 -> Just CallVn
+  26 | v >= 5 -> Just CallVn2
+  31 | v >= 5 -> Just CheckArgCount
+  _ -> Nothing
+lookupOp v CountExt n = case n of
+  2 | v >= 5 -> Just LogShift
+  3 | v >= 5 -> Just ArtShift
   _ -> Nothing
 
 -- | Whether an operation is followed by a store variable byte.
@@ -272,6 +293,8 @@ storesResult op =
            , Random
            , ReadChar
            , ScanTable
+           , LogShift
+           , ArtShift
            ]
 
 -- | Whether an operation is followed by branch information.
@@ -293,6 +316,7 @@ takesBranch op =
            , Restore
            , Verify
            , ScanTable
+           , CheckArgCount
            ]
 
 -- | Whether an operation is followed by inline text.
@@ -309,12 +333,18 @@ decode mem hdr pc0 = (inst, pcText)
 
     (count, opNum, operandSpec, pcOperands) = case opByte of
       b
+        | v >= 5 && b == 0xbe ->
+            ( CountExt
+            , fromIntegral (peekByte mem (pc0 + 1))
+            , takeWhile (/= 3) (typeBits (peekByte mem (pc0 + 2)))
+            , pc0 + 3
+            )
         | b >= 0xc0 ->
             -- Variable form: one type byte follows the opcode, or two
             -- for the "double variable" call, which takes up to eight
             -- operands.
             let num = fromIntegral (b .&. 31)
-                double = testBit b 5 && num == 12
+                double = testBit b 5 && num `elem` doubleVarOps v
                 types
                   | double =
                       typeBits (peekByte mem (pc0 + 1))
@@ -341,8 +371,11 @@ decode mem hdr pc0 = (inst, pcText)
             )
 
     longType var = if var then 2 else 1
+    v = zVersion hdr
+    doubleVarOps version =
+      [12 | version >= 4] ++ [26 | version >= 5]
 
-    op = case lookupOp (zVersion hdr) count opNum of
+    op = case lookupOp v count opNum of
       Just o -> o
       Nothing ->
         error
