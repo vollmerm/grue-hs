@@ -14,6 +14,7 @@ import Control.Exception (finally)
 import Control.Monad (replicateM_, void, when, zipWithM_)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word16, Word64)
@@ -21,6 +22,7 @@ import Files
 import Grue.Header (zVersion)
 import Grue.Interp
 import Grue.VM
+import Grue.ZString (charToZsciiInStory, zsciiToCharInStory)
 import Text.Printf (printf)
 import UI.HSCurses.Curses qualified as Curses
 import UI.HSCurses.CursesHelper qualified as CursesHelper
@@ -52,21 +54,22 @@ loop script buf vm0 = do
       render vm final ""
       void (CursesHelper.getKey (render vm final ""))
     NeedInput -> do
-      line <- editLine vm buf'
-      loop script' (append buf' (line <> "\n")) (provideInput line vm)
+      (line, term) <- editLine vm buf'
+      let echoed = line <> inputSuffix vm term <> "\n"
+      loop script' (append buf' echoed) (provideInputTerminated term line vm)
     NeedChar -> do
       render vm buf' ""
       key <- CursesHelper.getKey (render vm buf' "")
       loop script' buf' (provideChar (keyCode key) vm)
     SaveRequested bytes -> do
       let prompt = append buf' "Save to file: "
-      name <- editLine vm prompt
+      name <- editPrompt vm prompt
       let buf'' = append prompt (name <> "\n")
       ok <- writeSave name bytes
       loop script' buf'' (finishSave ok vm)
     RestoreRequested -> do
       let prompt = append buf' "Restore from file: "
-      name <- editLine vm prompt
+      name <- editPrompt vm prompt
       let buf'' = append prompt (name <> "\n")
       bytes <- readSave name
       loop script' buf'' (finishRestore bytes vm)
@@ -84,7 +87,7 @@ flushScript vm script buf t
         pure (script', buf)
       NotAsked -> do
         let prompt = append buf "Script to file: "
-        name <- editLine vm prompt
+        name <- editPrompt vm prompt
         let buf' = append prompt (name <> "\n")
         script' <- maybe (pure Declined) (`startScript` t) (scriptPath name)
         pure (script', buf')
@@ -134,31 +137,62 @@ addOutput vm buf out = do
   page (max 0 (total - new))
 
 -- | Read one line of input, echoing at the end of the scrollback.
-editLine :: VM -> Scrollback -> IO Text
-editLine vm buf = edit ""
+editLine :: VM -> Scrollback -> IO (Text, Word16)
+editLine vm = editWithTerminators vm (inputTerminators vm)
+
+editPrompt :: VM -> Scrollback -> IO Text
+editPrompt vm buf = fst <$> editWithTerminators vm [13] buf
+
+editWithTerminators :: VM -> [Word16] -> Scrollback -> IO (Text, Word16)
+editWithTerminators vm terminators buf = edit ""
   where
+    hdr = vmHeader vm
+    mem = vmMemory vm
     edit input = do
       render vm buf input
       key <- CursesHelper.getKey (render vm buf input)
       case key of
-        Curses.KeyChar '\n' -> pure input
-        Curses.KeyChar '\r' -> pure input
-        Curses.KeyEnter -> pure input
+        Curses.KeyChar '\n' -> pure (input, 13)
+        Curses.KeyChar '\r' -> pure (input, 13)
+        Curses.KeyEnter -> pure (input, 13)
         Curses.KeyBackspace -> edit (T.dropEnd 1 input)
         Curses.KeyChar c
           | c == '\b' || c == '\DEL' -> edit (T.dropEnd 1 input)
-          | c >= ' ' -> edit (input <> T.singleton c)
+          | c >= ' ' ->
+              case charToZsciiInStory mem hdr c of
+                Just code
+                  | code `elem` terminators -> pure (input, code)
+                _ -> edit (input <> T.singleton c)
+        other
+          | Just code <- zsciiKeyCode other
+          , code `elem` terminators ->
+              pure (input, code)
         _ -> edit input
+
+inputSuffix :: VM -> Word16 -> Text
+inputSuffix vm code
+  | code == 13 = ""
+  | otherwise =
+      maybe T.empty T.singleton (zsciiToCharInStory (vmMemory vm) (vmHeader vm) code)
 
 -- | The ZSCII code of a keypress for @read_char@.  Enter becomes 13;
 -- other keys pass through their character code.
 keyCode :: Curses.Key -> Word16
-keyCode key = case key of
-  Curses.KeyChar '\n' -> 13
-  Curses.KeyChar '\r' -> 13
-  Curses.KeyEnter -> 13
-  Curses.KeyChar c -> fromIntegral (fromEnum c)
-  _ -> 13
+keyCode = fromMaybe 13 . zsciiKeyCode
+
+zsciiKeyCode :: Curses.Key -> Maybe Word16
+zsciiKeyCode key = case key of
+  Curses.KeyChar '\n' -> Just 13
+  Curses.KeyChar '\r' -> Just 13
+  Curses.KeyEnter -> Just 13
+  Curses.KeyChar c -> Just (fromIntegral (fromEnum c))
+  Curses.KeyUp -> Just 129
+  Curses.KeyDown -> Just 130
+  Curses.KeyLeft -> Just 131
+  Curses.KeyRight -> Just 132
+  Curses.KeyF n
+    | n >= 1 && n <= 12 -> Just (fromIntegral (132 + n))
+  _ -> Nothing
 
 -- | Redraw the whole screen: status line, any upper window, story
 -- text, pending input.

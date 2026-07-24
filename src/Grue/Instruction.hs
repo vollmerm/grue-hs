@@ -55,6 +55,7 @@ data Op
   | Mod
   | Call2s
   | Call2n
+  | Throw
   | SetColour
   | -- 1OP
     Jz
@@ -85,10 +86,12 @@ data Op
   | Restart
   | RetPopped
   | Pop
+  | Catch
   | Quit
   | NewLine
   | ShowStatus
   | Verify
+  | Piracy
   | -- VAR
     Call
   | Storew
@@ -197,6 +200,7 @@ lookupOp v Count2 n = case n of
   25 | v >= 4 -> Just Call2s
   26 | v >= 5 -> Just Call2n
   27 | v >= 5 -> Just SetColour
+  28 | v >= 5 -> Just Throw
   _ -> Nothing
 lookupOp v Count1 n = case n of
   0 -> Just Jz
@@ -218,7 +222,7 @@ lookupOp v Count1 n = case n of
     | v >= 5 -> Just Call1n
     | otherwise -> Just Not
   _ -> Nothing
-lookupOp _ Count0 n = case n of
+lookupOp v Count0 n = case n of
   0 -> Just Rtrue
   1 -> Just Rfalse
   2 -> Just Print
@@ -228,11 +232,14 @@ lookupOp _ Count0 n = case n of
   6 -> Just Restore
   7 -> Just Restart
   8 -> Just RetPopped
-  9 -> Just Pop
+  9
+    | v >= 5 -> Just Catch
+    | otherwise -> Just Pop
   10 -> Just Quit
   11 -> Just NewLine
   12 -> Just ShowStatus
   13 -> Just Verify
+  15 | v >= 5 -> Just Piracy
   _ -> Nothing
 lookupOp v CountVar n = case n of
   0 -> Just Call
@@ -300,6 +307,7 @@ storesResult v op =
            , Call
            , Call1s
            , Call2s
+           , Catch
            , CallVs2
            , Random
            , ReadChar
@@ -325,6 +333,7 @@ takesBranch v op =
            , GetSibling
            , GetChild
            , Verify
+           , Piracy
            , ScanTable
            , CheckArgCount
            ]

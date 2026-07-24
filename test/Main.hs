@@ -31,10 +31,11 @@ main :: IO ()
 main = do
   stories <- loadStories
   precise <- loadPrecise
-  defaultMain (tests stories precise)
+  czechV5 <- loadCzechV5
+  defaultMain (tests stories precise czechV5)
 
-tests :: [Story] -> [Precise] -> TestTree
-tests stories precise =
+tests :: [Story] -> [Precise] -> Maybe FilePath -> TestTree
+tests stories precise czechV5 =
   testGroup
     "grue-hs"
     [ memoryTests
@@ -44,7 +45,7 @@ tests stories precise =
     , objectTests
     , instructionTests
     , interpTests
-    , conformanceTests
+    , conformanceTests czechV5
     , preciseTests precise
     , storyTests stories
     ]
@@ -155,6 +156,13 @@ loadStories = do
             pure [Story path spec (fromStory bytes)]
           else pure []
   concat <$> mapM load storySpecs
+
+loadCzechV5 :: IO (Maybe FilePath)
+loadCzechV5 = do
+  root <- storyRoot
+  let path = root </> "testers/czech/czech.z5"
+  exists <- doesFileExist path
+  pure (if exists then Just path else Nothing)
 
 -- | A little memory image with recognizable contents: byte @i@ holds
 -- value @i@ for the first 256 bytes.
@@ -805,6 +813,29 @@ instructionV5Cases =
   , testCase "version 5 restore stores instead of branching" $
       decodeAtVersion 5 [0xb6, 0x10]
         @?= (Instruction Restore [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 catch stores the current stack frame" $
+      decodeAtVersion 5 [0xb9, 0x10]
+        @?= (Instruction Catch [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 throw decodes as a 2OP instruction" $
+      decodeAtVersion 5 [0x3c, 42, 0x10]
+        @?= ( Instruction
+                Throw
+                [SmallConst 42, ByVariable 16]
+                Nothing
+                Nothing
+                Nothing
+            , 67
+            )
+  , testCase "version 5 piracy branches like a 0OP test" $
+      decodeAtVersion 5 [0xbf, 0xc4]
+        @?= ( Instruction
+                Piracy
+                []
+                Nothing
+                (Just (Branch True 65 (BranchAddr 68)))
+                Nothing
+            , 66
+            )
   ]
 
 -- | Boot a story assembled from segments of bytes at absolute
@@ -880,12 +911,24 @@ interpTests =
             routine = [0x01, 0x00, 0x05, 0xab, 0x01]
             (out, stop, _) = run (bootProg [(64, main'), (74, routine)])
         (out, stop) @?= ("9", Halted)
+    , testCase "version 5 routines zero-initialize locals" $ do
+        let main' = [0xe0, 0x3f, 0x00, 0x40, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            routine = [0x01, 0xab, 0x01]
+            (out, stop, _) = run (bootProgVersion 5 [(64, main'), (0x100, routine)])
+        (out, stop) @?= ("0", Halted)
     , testCase "call_1n leaves no discarded result on the stack" $ do
         let main' = [0x9f, 0x25, 0xba]
             routine = [0x00, 0xe6, 0x7f, 7, 0x9b, 1]
             (_, stop, vm) = run (bootProgVersion 5 [(64, main'), (148, routine)])
         stop @?= Halted
         frameEval (NE.head (vmFrames vm)) @?= []
+    , testCase "version 5 throw unwinds to the caught routine" $ do
+        let main' = [0xe0, 0x3f, 0x00, 0x40, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            catcher = [0x00, 0xb9, 0x10, 0x9f, 0x50, 0x9b, 0x00]
+            thrower = [0x00, 0x3c, 42, 0x10]
+            (out, stop, _) =
+              run (bootProgVersion 5 [(64, main'), (0x100, catcher), (0x140, thrower)])
+        (out, stop) @?= ("42", Halted)
     , testCase "call_vn2 leaves no discarded result on the stack" $ do
         let main' = [0xfa, 0x1f, 0xff, 0x00, 0x25, 7, 0xba]
             routine = [0x00, 0xe6, 0x7f, 9, 0x9b, 1]
@@ -1123,6 +1166,35 @@ interpTests =
         peekWord mem 0x1c6 @?= 0
         peekByte mem 0x1c8 @?= 4
         peekByte mem 0x1c9 @?= 6
+    , testCase "version 5 aread honors terminating-character tables" $ do
+        let prog =
+              concat
+                [ [0xf3, 0x7f, 0x02]
+                , [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10]
+                , [0xba]
+                ]
+            vm0 =
+              bootProgVersion
+                5
+                [ (0x2e, wordBytes 0x140)
+                , (64, prog)
+                , (0x100, dictBytesVersion 5)
+                , (0x140, [46, 0])
+                , (0x180, [20, 0])
+                , (0x1c0, [5, 0])
+                ]
+            (_, stop1, vm1) = run vm0
+            vm2 = provideInputTerminated 46 "go east" vm1
+            (_, stop2, vm3) = run vm2
+            mem = vmMemory vm3
+        stop1 @?= NeedInput
+        inputTerminators vm1 @?= [13, 46]
+        stop2 @?= Halted
+        peekVar 16 vm3 @?= 46
+        peekByte mem 0x181 @?= 7
+        [peekByte mem (0x182 + i) | i <- [0 .. 6]]
+          @?= map (fromIntegral . fromEnum) "go east"
+        fst (takeTranscript vm3) @?= "go east.\n"
     , testCase "tokenise honors unsorted user dictionaries and preserve flag" $ do
         let userDict = [0, 9, 0xff, 0xfe] ++ concatMap entry ["sword", "go"]
             entry w =
@@ -1216,17 +1288,20 @@ interpTests =
         drawnWith 1 @?= drawnWith 2
     ]
 
--- | The czech conformance suite, compiled to versions 3 and 4 and
--- bundled with the repository, must run to completion with no failures.
--- czech needs no input: it prints its results and quits.
-conformanceTests :: TestTree
-conformanceTests =
+-- | The bundled czech conformance suite covers versions 3 and 4; when a
+-- version 5 build is present in the external story collection, it is
+-- checked too. czech needs no input: it prints its results and quits.
+conformanceTests :: Maybe FilePath -> TestTree
+conformanceTests czechV5 =
   testGroup
     "czech conformance"
-    [ czechCase "test/stories/czech.z3" 3 349
-    , czechCase "test/stories/czech.z4" 4 367
-    ]
+    ( [ czechCase "test/stories/czech.z3" 3 349
+      , czechCase "test/stories/czech.z4" 4 367
+      ]
+        ++ maybe [] (\path -> [czechCase path 5 406]) czechV5
+    )
   where
+    czechCase :: FilePath -> Int -> Int -> TestTree
     czechCase path version passed = testCase path $ do
       bytes <- BS.readFile path
       zVersion (readHeader (fromStory bytes)) @?= version
@@ -1271,11 +1346,11 @@ loadPrecise = mapM load . sort . filter isStory =<< listDirectory preciseDir
 
 -- | Drive a booted machine over a scripted input stream exactly as the
 -- console frontend does, and return the text it prints.  Input is not
--- echoed; each 'NeedInput' consumes one line and each 'NeedChar' one
--- character, and running out of input ends the run as end-of-file
--- would.  Save and restore requests are answered as a successful save
--- and a declined restore, enough to step through those paths without a
--- file system.
+-- echoed; each 'NeedInput' consumes text through the next line break or
+-- terminating character, and each 'NeedChar' one character.  Running
+-- out of input ends the run as end-of-file would.  Save and restore
+-- requests are answered as a successful save and a declined restore,
+-- enough to step through those paths without a file system.
 playScript :: VM -> T.Text -> T.Text
 playScript = go True T.empty
   where
@@ -1290,15 +1365,25 @@ playScript = go True T.empty
             NeedInput
               | T.null input -> finish atLineStart' acc'
               | otherwise ->
-                  let (line, rest) = breakLine input
-                   in go atLineStart' acc' (provideInput (T.strip line) vm') rest
+                  let (line, term, rest) = breakInput vm' input
+                   in go atLineStart' acc' (provideInputTerminated term line vm') rest
             NeedChar -> case T.uncons input of
               Nothing -> finish atLineStart' acc'
               Just (c, rest) -> go atLineStart' acc' (provideChar (charZscii c) vm') rest
     finish atLineStart acc
       | atLineStart = acc
       | otherwise = acc <> "\n"
-    breakLine t = let (line, rest) = T.break (== '\n') t in (line, T.drop 1 rest)
+    breakInput vm = scanInput T.empty
+      where
+        hdr = vmHeader vm
+        mem = vmMemory vm
+        terminators = inputTerminators vm
+        scanInput acc t = case T.uncons t of
+          Nothing -> (acc, 13, T.empty)
+          Just (c, rest) -> case charToZsciiInStory mem hdr c of
+            Just code
+              | code `elem` terminators -> (acc, code, rest)
+            _ -> scanInput (acc <> T.singleton c) rest
     charZscii c = if c == '\n' then 13 else fromIntegral (fromEnum c)
 
 -- | Precise input\/output tests: each purpose-built story is driven

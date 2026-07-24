@@ -13,7 +13,8 @@ import Data.Word (Word64)
 import Files
 import Grue.Interp
 import Grue.VM
-import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hSetBuffering, stdin, stdout)
+import Grue.ZString (charToZsciiInStory)
+import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hIsTerminalDevice, hSetBuffering, stdin, stdout)
 
 -- | Run the story, flushing output and feeding input until it halts.
 -- The transcript always ends with a newline, so a final prompt does
@@ -33,8 +34,10 @@ play seed story = do
       case stop of
         Halted -> finish atLineStart'
         NeedInput ->
-          withLine (finish atLineStart') $ \line ->
-            loop atLineStart' script' (provideInput (T.strip line) vm'')
+          withInputLine vm'' (finish atLineStart') $ \(line, term) -> do
+            newline <- needsInputNewline term
+            if newline then putStrLn "" else pure ()
+            loop atLineStart' script' (provideInputTerminated term line vm'')
         NeedChar -> do
           eof <- hIsEOF stdin
           if eof
@@ -57,6 +60,27 @@ play seed story = do
     withLine onEOF act = do
       eof <- hIsEOF stdin
       if eof then onEOF else act =<< TIO.getLine
+    withInputLine vm onEOF act = do
+      eof <- hIsEOF stdin
+      if eof then onEOF else act =<< readInputLine vm
+    readInputLine vm = go T.empty
+      where
+        hdr = vmHeader vm
+        mem = vmMemory vm
+        terminators = inputTerminators vm
+        go acc = do
+          eof <- hIsEOF stdin
+          if eof
+            then pure (acc, 13)
+            else do
+              c <- hGetChar stdin
+              case charToZsciiInStory mem hdr c of
+                Just code
+                  | code `elem` terminators -> pure (acc, code)
+                _ -> go (acc <> T.singleton c)
+    needsInputNewline term
+      | term == 13 = pure False
+      | otherwise = hIsTerminalDevice stdin
     -- read_char consumes a single byte, so scripted input stays in step
     -- with the reference interpreter.  A newline becomes ZSCII 13.
     charZscii c = if c == '\n' then 13 else fromIntegral (fromEnum c)

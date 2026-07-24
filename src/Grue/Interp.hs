@@ -5,11 +5,13 @@
 -- Execution is pure.  'run' advances the machine until it either needs
 -- a line of player input or halts, accumulating output text along the
 -- way; the frontend prints the text, gathers input, and resumes with
--- 'provideInput'.
+-- 'provideInput' or 'provideInputTerminated'.
 module Grue.Interp
   ( Stop (..)
   , run
+  , inputTerminators
   , provideInput
+  , provideInputTerminated
   , provideChar
   , finishSave
   , finishRestore
@@ -128,8 +130,13 @@ callRoutine packed args st discard = do
       hdr = vmHeader vm
       addr = packedToByte hdr packed
       count = fromIntegral (peekByte mem addr)
-      initials = [peekWord mem (addr + 1 + 2 * i) | i <- [0 .. count - 1]]
+      initials
+        | zVersion hdr >= 5 = replicate count 0
+        | otherwise = [peekWord mem (addr + 1 + 2 * i) | i <- [0 .. count - 1]]
       locals = zipWith fromMaybe initials (map Just args ++ repeat Nothing)
+      entry
+        | zVersion hdr >= 5 = addr + 1
+        | otherwise = addr + 1 + 2 * count
       frame =
         Frame
           { frameLocals = Seq.fromList locals
@@ -142,7 +149,7 @@ callRoutine packed args st discard = do
   put
     vm
       { vmFrames = NE.cons frame (vmFrames vm)
-      , vmPC = addr + 1 + 2 * count
+      , vmPC = entry
       }
 
 -- | Interpret a machine word as signed.
@@ -228,6 +235,12 @@ exec storeAt (Instruction op operands st br text) = case op of
     v <- val1
     modify (pushEval v)
   Pop -> continue (void (state popEval))
+  Catch -> continue $ do
+    vm <- get
+    storeTo st (fromIntegral (NE.length (vmFrames vm) - 1))
+  Throw -> continue $ do
+    (v, frameId) <- val2
+    throwToFrame v frameId
   Pull -> continue $ do
     ref <- val1
     v <- state popEval
@@ -386,6 +399,7 @@ exec storeAt (Instruction op operands st br text) = case op of
   Verify ->
     branch0 $
       gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
+  Piracy -> branch0 (pure True)
   Quit -> pure (Just Halted)
   Restart -> continue $ modify restart
   Save
@@ -564,6 +578,19 @@ exec storeAt (Instruction op operands st br text) = case op of
           v = unsigned (f (signed (peekVar n vm)))
        in (v, pokeVar n v vm)
 
+    throwToFrame result frameId = do
+      modify (unwindFrames (fromIntegral frameId))
+      returnValue result
+
+    unwindFrames target vm
+      | currentDepth == target = vm
+      | currentDepth < target = error ("Grue.Interp.throw: invalid stack frame " ++ show target)
+      | otherwise = unwindFrames target (vm {vmFrames = dropCurrent (vmFrames vm)})
+      where
+        currentDepth = NE.length (vmFrames vm) - 1
+        dropCurrent (_ :| []) = error "Grue.Interp.throw: cannot throw to the top level"
+        dropCurrent (_ :| (f : rest)) = f :| rest
+
     advance rng = snd (nextRandom 1 rng)
 
     shiftLogical n places
@@ -730,19 +757,36 @@ restart vm =
   where
     fresh = boot (originalBytes (vmMemory vm))
 
+-- | The ZSCII codes that currently terminate a pending @read@.  Enter
+-- (13) always ends the line; version 5 stories may add more codes
+-- through the header's terminating-characters table.
+inputTerminators :: VM -> [Word16]
+inputTerminators vm = case vmPending vm of
+  Just PendingRead {} -> 13 : filter (/= 13) (terminatorTable (vmMemory vm) (vmHeader vm))
+  _ -> [13]
+
 -- | Complete a pending @read@: store the typed line in the text
 -- buffer, tokenize it against the standard dictionary, and fill the
 -- parse buffer.  The machine is left ready to 'run' again.  A running
 -- transcript receives the input line, as the standard requires.
 provideInput :: Text -> VM -> VM
-provideInput input vm = case vmPending vm of
+provideInput = provideInputTerminated 13
+
+-- | Complete a pending @read@ with an explicit terminating character.
+-- Version 5 @aread@ stores that ZSCII code in its result variable.
+provideInputTerminated :: Word16 -> Text -> VM -> VM
+provideInputTerminated terminator input vm = case vmPending vm of
   Just (PendingRead tbuf pbuf st) ->
     withResult {vmPending = Nothing}
     where
-      echoed
-        | transcriptOn vm = emitTranscript (input <> "\n") vm
-        | otherwise = vm
       hdr = vmHeader vm
+      typedTerminator
+        | terminator == 13 = T.empty
+        | otherwise =
+            maybe T.empty T.singleton (zsciiToCharInStory (vmMemory vm) hdr terminator)
+      echoed
+        | transcriptOn vm = emitTranscript (input <> typedTerminator <> "\n") vm
+        | otherwise = vm
       mem = vmMemory echoed
       line = enteredLine hdr mem tbuf input
       withText = writeTextBuffer mem hdr tbuf line
@@ -750,7 +794,7 @@ provideInput input vm = case vmPending vm of
         | zVersion hdr >= 5 && pbuf == 0 = withText
         | otherwise = writeParseBuffer withText hdr (readDictionary withText hdr) pbuf 0 line
       withMemory = echoed {vmMemory = written}
-      withResult = maybe withMemory (\var -> writeVar var 13 withMemory) st
+      withResult = maybe withMemory (\var -> writeVar var terminator withMemory) st
   _ -> error "Grue.Interp.provideInput: no read is pending"
 
 enteredLine :: Header -> Memory -> Int -> Text -> Text
@@ -820,6 +864,16 @@ writeParseBuffer mem hdr dict pbuf flag line = counted
     counted =
       pokeByte (pbuf + 1) (fromIntegral (length tokens)) $
         foldr (uncurry entry) mem (zip [0 ..] tokens)
+
+terminatorTable :: Memory -> Header -> [Word16]
+terminatorTable mem hdr
+  | zVersion hdr < 5 = []
+  | terminatingCharsAddr hdr == 0 = []
+  | otherwise = go (terminatingCharsAddr hdr)
+  where
+    go addr = case peekByte mem addr of
+      0 -> []
+      code -> fromIntegral code : go (addr + 1)
 
 -- | Complete a pending @read_char@ by storing the ZSCII code of the
 -- keypress in the instruction's store variable.
