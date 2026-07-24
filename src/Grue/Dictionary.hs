@@ -9,6 +9,7 @@
 module Grue.Dictionary
   ( Dictionary (..)
   , readDictionary
+  , readDictionaryAt
   , entryAddr
   , lookupWord
   , allWords
@@ -40,18 +41,24 @@ data Dictionary = Dictionary
 -- | Read the layout of the standard dictionary, whose address is given
 -- in the story header.
 readDictionary :: Memory -> Header -> Dictionary
-readDictionary mem hdr =
+readDictionary mem hdr = readDictionaryAt mem hdr (dictionaryAddr hdr)
+
+-- | Read the layout of a dictionary rooted at the given byte address.
+readDictionaryAt :: Memory -> Header -> Int -> Dictionary
+readDictionaryAt mem _hdr base =
   Dictionary
     { dictSeparators = seps
     , dictEntryLength = fromIntegral (peekByte mem (base + 1 + n))
-    , dictEntryCount = fromIntegral (peekWord mem (base + 2 + n))
+    , dictEntryCount = signedCount (peekWord mem (base + 2 + n))
     , dictEntriesAddr = base + 4 + n
     }
   where
-    base = dictionaryAddr hdr
     n = fromIntegral (peekByte mem base)
     codes = [peekByte mem (base + 1 + i) | i <- [0 .. n - 1]]
     seps = mapMaybe (zsciiToChar . fromIntegral) codes
+    signedCount raw
+      | raw < 0x8000 = fromIntegral raw
+      | otherwise = fromIntegral raw - 0x10000
 
 -- | The byte address of a dictionary entry, by index.
 entryAddr :: Dictionary -> Int -> Int
@@ -69,7 +76,9 @@ entryKey mem hdr dict i =
 -- if present.  Entries are stored in ascending order of their encoded
 -- text, so the search is a binary chop.
 lookupWord :: Memory -> Header -> Dictionary -> Text -> Maybe Int
-lookupWord mem hdr dict word = go 0 (dictEntryCount dict - 1)
+lookupWord mem hdr dict word
+  | dictEntryCount dict < 0 = entryAddr dict <$> findUnsorted 0
+  | otherwise = go 0 (entryTotal dict - 1)
   where
     key = encodeWord hdr word
     go lo hi
@@ -80,13 +89,17 @@ lookupWord mem hdr dict word = go 0 (dictEntryCount dict - 1)
           GT -> go (mid + 1) hi
       where
         mid = (lo + hi) `div` 2
+    findUnsorted i
+      | i >= entryTotal dict = Nothing
+      | entryKey mem hdr dict i == key = Just i
+      | otherwise = findUnsorted (i + 1)
 
 -- | Decode the text of every dictionary entry, in table order.  Useful
 -- for inspecting a story's vocabulary.
 allWords :: Memory -> Header -> Dictionary -> [Text]
 allWords mem hdr dict =
   [ decodeStringAt mem hdr (entryAddr dict i)
-  | i <- [0 .. dictEntryCount dict - 1]
+  | i <- [0 .. entryTotal dict - 1]
   ]
 
 -- | Split input text into words, returning each with its character
@@ -106,3 +119,6 @@ tokenize dict input = go 0 (T.unpack input)
       | otherwise = (i, T.pack word) : go (i + length word) rest
       where
         (word, rest) = break (\x -> x == ' ' || isSep x) (c : cs)
+
+entryTotal :: Dictionary -> Int
+entryTotal = abs . dictEntryCount

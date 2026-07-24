@@ -95,6 +95,8 @@ data PendingInput
       Int
       -- | Byte address of the parse buffer.
       Int
+      -- | The result variable for version-5 @aread@.
+      (Maybe Word8)
   | -- | A single keypress for @read_char@; the store variable receives
     -- the ZSCII code.
     PendingReadChar Word8

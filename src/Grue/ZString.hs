@@ -15,6 +15,7 @@ module Grue.ZString
 
     -- * Encoding
   , encodeWord
+  , encodeText
 
     -- * ZSCII
   , zsciiToChar
@@ -24,6 +25,7 @@ module Grue.ZString
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.Char (chr, ord, toLower)
 import Data.List (elemIndex)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word16)
@@ -157,6 +159,11 @@ encodeWord hdr word = packWords (take count (zchars ++ repeat 5))
   where
     count = if zVersion hdr <= 3 then 6 else 9
     zchars = concatMap encodeChar (T.unpack (T.toLower word))
+
+-- | Encode a ZSCII buffer slice into dictionary form, as
+-- @encode_text@ requires.
+encodeText :: Header -> [Word16] -> [Word16]
+encodeText hdr = encodeWord hdr . T.pack . mapMaybe zsciiToChar
 
 -- | The Z-characters for a single input character: a plain A0 letter,
 -- a shift into A2, or a full ZSCII escape.

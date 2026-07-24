@@ -117,6 +117,10 @@ data Op
   | ReadChar
   | ScanTable
   | CheckArgCount
+  | Tokenise
+  | EncodeText
+  | CopyTable
+  | PrintTable
   | -- EXT
     LogShift
   | ArtShift
@@ -258,6 +262,10 @@ lookupOp v CountVar n = case n of
   24 | v >= 5 -> Just Not
   25 | v >= 5 -> Just CallVn
   26 | v >= 5 -> Just CallVn2
+  27 | v >= 5 -> Just Tokenise
+  28 | v >= 5 -> Just EncodeText
+  29 | v >= 5 -> Just CopyTable
+  30 | v >= 5 -> Just PrintTable
   31 | v >= 5 -> Just CheckArgCount
   _ -> Nothing
 lookupOp v CountExt n = case n of
@@ -299,7 +307,7 @@ storesResult v op =
            , LogShift
            , ArtShift
            ]
-    || (v >= 5 && op `elem` [Save, Restore])
+    || (v >= 5 && op `elem` [Sread, Save, Restore])
 
 -- | Whether an operation is followed by branch information.
 takesBranch :: Int -> Op -> Bool

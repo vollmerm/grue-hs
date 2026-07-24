@@ -720,6 +720,26 @@ instructionV5Cases =
                 Nothing
             , 70
             )
+  , testCase "version 5 aread stores its terminator result" $
+      decodeAtVersion 5 [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10]
+        @?= ( Instruction
+                Sread
+                [LargeConst 0x0180, LargeConst 0x01c0]
+                (Just 0x10)
+                Nothing
+                Nothing
+            , 71
+            )
+  , testCase "tokenise decodes four operands" $
+      decodeAtVersion 5 [0xfb, 0x05, 0x01, 0x80, 0x01, 0xc0, 0x00, 0x01]
+        @?= ( Instruction
+                Tokenise
+                [LargeConst 0x0180, LargeConst 0x01c0, SmallConst 0x00, SmallConst 0x01]
+                Nothing
+                Nothing
+                Nothing
+            , 72
+            )
   , testCase "version 5 save stores instead of branching" $
       decodeAtVersion 5 [0xb5, 0x10]
         @?= (Instruction Save [] (Just 0x10) Nothing Nothing, 66)
@@ -774,12 +794,15 @@ runProgVM code = run (bootProg [(64, code)])
 -- | A small dictionary for programs that read input: separators
 -- @. , \"@, entry length 7, and four sorted words.
 dictBytes :: [Word8]
-dictBytes =
-  [3, 46, 44, 34, 7, 0, 4]
+dictBytes = dictBytesVersion 3
+
+dictBytesVersion :: Word8 -> [Word8]
+dictBytesVersion version =
+  [3, 46, 44, 34, fromIntegral (2 * length (encodeWord hdr "go") + 3), 0, 4]
     ++ concatMap entry ["go", "look", "nearby", "sword"]
   where
-    v3hdr = readHeader (mkStory [] [])
-    entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
+    hdr = readHeader (mkStoryVersion version [] [])
+    entry w = concatMap wordBytes (encodeWord hdr w) ++ [0, 0, 0]
 
 interpTests :: TestTree
 interpTests =
@@ -1018,6 +1041,75 @@ interpTests =
         peekWord mem 0x1c6 @?= 0
         peekByte mem 0x1c8 @?= 4
         peekByte mem 0x1c9 @?= 5
+    , testCase "version 5 aread stores length, positions, and the terminator" $ do
+        let prog = [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [(64, prog), (0x100, dictBytesVersion 5), (0x180, [20, 0]), (0x1c0, [5, 0])]
+            (out1, stop1, vm1) = run vm0
+        (out1, stop1) @?= ("", NeedInput)
+        let vm2 = provideInput "go  EAST" vm1
+            (_, stop2, vm3) = run vm2
+            mem = vmMemory vm3
+        stop2 @?= Halted
+        peekVar 16 vm3 @?= 13
+        peekByte mem 0x181 @?= 8
+        [peekByte mem (0x182 + i) | i <- [0 .. 7]]
+          @?= map (fromIntegral . fromEnum) "go  east"
+        peekByte mem 0x1c1 @?= 2
+        peekWord mem 0x1c2 @?= 0x0107
+        peekByte mem 0x1c4 @?= 2
+        peekByte mem 0x1c5 @?= 2
+        peekWord mem 0x1c6 @?= 0
+        peekByte mem 0x1c8 @?= 4
+        peekByte mem 0x1c9 @?= 6
+    , testCase "tokenise honors unsorted user dictionaries and preserve flag" $ do
+        let userDict = [0, 9, 0xff, 0xfe] ++ concatMap entry ["sword", "go"]
+            entry w =
+              concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) w) ++ [0, 0, 0]
+            prog = [0xfb, 0x01, 0x01, 0x80, 0x01, 0xc0, 0x01, 0x40, 0x01, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [ (64, prog)
+                , (0x100, dictBytesVersion 5)
+                , (0x140, userDict)
+                , (0x180, 20 : 8 : map (fromIntegral . fromEnum) "go  east")
+                , (0x1c0, [5, 0, 0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44])
+                ]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        peekByte mem 0x1c1 @?= 2
+        peekWord mem 0x1c2 @?= 0x014d
+        peekByte mem 0x1c4 @?= 2
+        peekByte mem 0x1c5 @?= 2
+        [peekByte mem (0x1c6 + i) | i <- [0 .. 3]] @?= [0x11, 0x22, 0x33, 0x44]
+    , testCase "encode_text writes dictionary-form bytes" $ do
+        let encoded = concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) "sword")
+            prog = [0xfc, 0x14, 0x01, 0x80, 5, 0, 0x01, 0xa0, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [ (64, prog)
+                , (0x180, map (fromIntegral . fromEnum) "sword")
+                ]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        [peekByte mem (0x1a0 + i) | i <- [0 .. 5]] @?= encoded
+    , testCase "copy_table preserves overlapping source bytes" $ do
+        let prog = [0xfd, 0x07, 0x01, 0x80, 0x01, 0x82, 4, 0xba]
+            vm0 = bootProgVersion 5 [(64, prog), (0x180, [1, 2, 3, 4])]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        [peekByte mem (0x180 + i) | i <- [0 .. 5]] @?= [1, 2, 1, 2, 3, 4]
+    , testCase "print_table prints a text rectangle" $
+        let prog = [0xfe, 0x15, 0x01, 0x80, 3, 2, 0, 0xba]
+            (out, stop, _) = run (bootProgVersion 5 [(64, prog), (0x180, map (fromIntegral . fromEnum) "abcd12")])
+         in (out, stop) @?= ("abc\nd12", Halted)
     , testCase "scan_table finds a matching word and stores its address" $ do
         let table = concatMap wordBytes [10, 20, 30]
             -- scan_table 20 0x140 3 -> G0 ?(next); quit
