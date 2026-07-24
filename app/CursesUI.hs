@@ -16,7 +16,7 @@ import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Word (Word16)
+import Data.Word (Word16, Word64)
 import Files
 import Grue.Header (zVersion)
 import Grue.Interp
@@ -33,9 +33,9 @@ type Scrollback = [Text]
 scrollbackLimit :: Int
 scrollbackLimit = 500
 
-play :: BS.ByteString -> IO ()
-play story =
-  (CursesHelper.start >> loop NotAsked [""] (boot story))
+play :: Word64 -> BS.ByteString -> IO ()
+play seed story =
+  (CursesHelper.start >> loop NotAsked [""] (bootWithSeed seed story))
     `finally` CursesHelper.end
 
 loop :: ScriptFile -> Scrollback -> VM -> IO ()

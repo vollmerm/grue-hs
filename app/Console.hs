@@ -9,6 +9,7 @@ module Console (play) where
 import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Word (Word64)
 import Files
 import Grue.Interp
 import Grue.VM
@@ -17,10 +18,10 @@ import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hSetBuffering, std
 -- | Run the story, flushing output and feeding input until it halts.
 -- The transcript always ends with a newline, so a final prompt does
 -- not run into the shell's.
-play :: BS.ByteString -> IO ()
-play story = do
+play :: Word64 -> BS.ByteString -> IO ()
+play seed story = do
   hSetBuffering stdout NoBuffering
-  loop True NotAsked (boot story)
+  loop True NotAsked (bootWithSeed seed story)
   where
     loop atLineStart script vm = do
       let (out, stop, vm') = run vm
