@@ -10,7 +10,7 @@ import Data.List (sort)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
-import Data.Word (Word16, Word8)
+import Data.Word (Word16, Word64, Word8)
 import Grue.Dictionary
 import Grue.Header
 import Grue.Instruction
@@ -678,14 +678,22 @@ bootProg = bootProgVersion 3
 
 -- | Like 'bootProg', but for a story of the given version.
 bootProgVersion :: Word8 -> [(Int, [Word8])] -> VM
-bootProgVersion version segments = boot flattened
+bootProgVersion version = boot . progImage version
+
+-- | Like 'bootProg', but with an explicit random seed.
+bootProgSeeded :: Word64 -> [(Int, [Word8])] -> VM
+bootProgSeeded seed = bootWithSeed seed . progImage 3
+
+-- | The flattened story image for a set of code segments.
+progImage :: Word8 -> [(Int, [Word8])] -> BS.ByteString
+progImage version segments =
+  BS.pack [peekByte mem i | i <- [0 .. memorySize mem - 1]]
   where
     mem0 =
       mkStoryVersion version [(0x06, 64), (0x08, 0x100), (0x0c, 0x130)] (replicate 448 0)
     place (addr, bytes) m =
       foldr (\(i, b) -> pokeByte i b) m (zip [addr ..] bytes)
     mem = foldr place mem0 segments
-    flattened = BS.pack [peekByte mem i | i <- [0 .. memorySize mem - 1]]
 
 -- | Run a program consisting of a single code segment at address 64.
 runProg :: [Word8] -> (T.Text, Stop)
@@ -930,6 +938,22 @@ interpTests =
             (_, stop, vm) = run (bootProgVersion 4 [(64, prog)])
         stop @?= Halted
         toList (upperLines (vmUpper vm)) @?= ["hi"]
+    , testCase "the boot seed steers the random sequence" $ do
+        -- Draw four values and print them; a different boot seed must
+        -- give a different sequence.
+        let draw = [0xe7, 0x7f, 9, 0x10, 0xe6, 0xbf, 0x10] -- random 9 -> g0; print_num g0
+            prog = concat (replicate 4 draw) ++ [0xba]
+            drawnWith s = let (out, _, _) = run (bootProgSeeded s [(64, prog)]) in out
+        assertBool "two seeds produced the same sequence" $
+          drawnWith 1 /= drawnWith 2
+    , testCase "a negative random argument seeds a predictable sequence" $ do
+        -- random with a negative argument reseeds to a fixed sequence,
+        -- so the draws afterwards no longer depend on the boot seed.
+        let reseed = [0xe7, 0x3f, 0xff, 0xf9, 0x00] -- random -7 (discard)
+            draw = [0xe7, 0x7f, 9, 0x10, 0xe6, 0xbf, 0x10]
+            prog = reseed ++ concat (replicate 4 draw) ++ [0xba]
+            drawnWith s = let (out, _, _) = run (bootProgSeeded s [(64, prog)]) in out
+        drawnWith 1 @?= drawnWith 2
     ]
 
 -- | The czech conformance suite, compiled to versions 3 and 4 and
