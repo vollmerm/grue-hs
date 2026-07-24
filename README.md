@@ -1,8 +1,8 @@
 # grue-hs
 
-A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). This interpreter targets version 4 of the format, which covers much of the Infocom catalog.
+A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). This interpreter targets versions 3 and 4 of the format, which cover much of the Infocom catalog.
 
-The core opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work, but the implementation hasn't been fully tested yet. Support for Z-machine versions beyond 4 is planned but not implemented.
+The opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work. Support for Z-machine versions beyond 4 is planned but not implemented.
 
 ## Building
 
@@ -22,9 +22,31 @@ The `grue-hs` executable opens a full-screen curses interface when run from a te
 
 ## Testing
 
+Correctness is checked two ways.
+
+The `cabal test` suite runs a set of unit tests along with the CZECH conformance suite (compiled for both v3 and v4) and a full save/restore roundtrip against the bundled `cloak.z3`:
+
 ```
 cabal test
 ```
+
+To run a single test or group, pass a [tasty](https://hackage.haskell.org/package/tasty) pattern:
+
+```
+cabal run grue-test -- -p Quetzal
+```
+
+The second check is byte-for-byte transcript comparison against a reference interpreter. `tools/compare.sh` runs both grue-hs and `fizmo-console` over the same walkthrough script (see `tools/walkthroughs/`) and diffs the output:
+
+```
+tools/compare.sh STORY.z3 tools/walkthroughs/minizork.txt
+```
+
+Walkthroughs stick to deterministic commands, since responses chosen at random (combat, snarky refusals) vary between runs of the reference interpreter itself.
+
+## Acknowledgements
+
+grue-hs has leaned heavily on [fizmo](https://github.com/chrender/fizmo) throughout its development. Its `fizmo-console` frontend serves as the reference interpreter for transcript comparison, and fizmo has been a valuable baseline and source of inspiration for getting the Z-machine's behaviour right.
 
 ## License
 
