@@ -1,0 +1,17 @@
+! Target: v3
+! Oracle: grue
+!
+! grue seeds its PRNG to a fixed value at boot, so the sequence a story
+! draws is fully determined.  This freezes ten rolls of a six-sided die
+! (every value must fall in 1..6).  No other interpreter reproduces
+! grue's generator, so the expected output is frozen from grue itself
+! rather than from fizmo -- a regression lock on the deterministic RNG.
+[ Main i r;
+  for (i=0 : i<10 : i++) {
+    @random 6 -> r;
+    print r;
+    if (i < 9) print " ";
+  }
+  @new_line;
+  @quit;
+];

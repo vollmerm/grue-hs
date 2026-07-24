@@ -1,0 +1,13 @@
+! Target: v4
+!
+! read_char returns the ZSCII code of each key press.  Fed a scripted
+! stream (one byte per read_char, as at the console), we echo the code
+! of the first three keys.  read_char is a version 4 opcode.
+! fizmo-console serves as the oracle.
+[ Main i c;
+  for (i=0 : i<3 : i++) {
+    @read_char 1 -> c;
+    print "key=", c, "^";
+  }
+  @quit;
+];

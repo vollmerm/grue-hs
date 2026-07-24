@@ -1,0 +1,7 @@
+words: 2
+  len=4 pos=1 found=1
+  len=4 pos=6 found=1
+words: 3
+  len=5 pos=1 found=0
+  len=4 pos=7 found=1
+  len=4 pos=12 found=1

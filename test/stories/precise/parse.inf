@@ -1,0 +1,39 @@
+! Target: v3
+!
+! Sentence tokenisation through sread.  For each line typed, grue splits
+! it into words and fills the parse buffer; we echo the word count and,
+! per word, the number of letters, the 1-based position in the input,
+! and whether the word was found in the dictionary.  A few words are
+! seeded into the dictionary so "found" is meaningful.  fizmo-console
+! serves as the oracle.
+Array text_buffer -> 64;
+Array parse_buffer -> 34;
+
+! Referencing these dictionary words forces them into the dictionary.
+Array known --> 'take' 'lamp' 'coin';
+
+[ report i n block;
+  n = parse_buffer->1;
+  print "words: ", n, "^";
+  for (i=0 : i<n : i++) {
+    block = 2 + i*4;                      ! this word's 4-byte parse block
+    print "  len=", parse_buffer->(block+2),
+          " pos=", parse_buffer->(block+3),
+          " found=";
+    if (parse_buffer-->(block/2)) print "1"; else print "0";
+    print "^";
+  }
+];
+
+[ readline;
+  text_buffer->0 = 60;
+  parse_buffer->0 = 16;
+  @sread text_buffer parse_buffer;
+  report();
+];
+
+[ Main;
+  readline();
+  readline();
+  @quit;
+];

@@ -1,0 +1,40 @@
+! Target: v3
+!
+! Object-tree surgery and attributes, exercised through grue's object
+! opcodes (get_parent / get_child / get_sibling, jin, test / set /
+! clear_attr, insert_obj / remove_obj, and print_obj for the short
+! names).  Object 0 is never printed as a name, so the output stays
+! well-defined.  fizmo-console serves as the oracle.
+Attribute lit;
+
+Object desk "desk";
+Object box "box";
+Object coin "coin";
+Object lamp "lamp";
+
+[ yesno c; if (c) print "yes"; else print "no"; ];
+
+[ Main;
+  move box to desk;
+  move coin to box;
+  move lamp to box;                     ! lamp becomes box's first child
+
+  print "box is in the ", (object) parent(box), "^";
+  print "first in box: ", (object) child(box), "^";
+  print "next to it: ", (object) sibling(child(box)), "^";
+  print "coin in box? "; yesno(coin in box); print "^";
+  print "coin in desk? "; yesno(coin in desk); print "^";
+
+  give lamp lit;
+  print "lamp lit? "; yesno(lamp has lit); print "^";
+  give lamp ~lit;
+  print "lamp lit? "; yesno(lamp has lit); print "^";
+
+  remove coin;
+  print "coin still in box? "; yesno(coin in box); print "^";
+  print "box's first is now the ", (object) child(box), "^";
+
+  move coin to desk;
+  print "coin now in the ", (object) parent(coin), "^";
+  @quit;
+];

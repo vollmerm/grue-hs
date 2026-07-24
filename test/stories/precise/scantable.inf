@@ -1,0 +1,23 @@
+! Target: v4
+!
+! scan_table over a word table (form $82: word entries, stride 2) and a
+! byte table (form $01: byte entries, stride 1), reporting the byte
+! offset of each hit from the table base, or a miss.  scan_table is a
+! version 4 opcode.  fizmo-console serves as the oracle.
+Array wtab --> 11 22 33 44 55;
+Array btab -> 5 15 25 35 45;
+
+[ find val tab len form addr;
+  @scan_table val tab len form -> addr ?done;  ! branch lands on the next line either way
+  .done;
+  if (addr == 0) print "miss";
+  else print "at+", addr - tab;
+];
+
+[ Main;
+  print "word 33: "; find(33, wtab, 5, $82); print "^";
+  print "word 99: "; find(99, wtab, 5, $82); print "^";
+  print "byte 35: "; find(35, btab, 5, $01); print "^";
+  print "byte 99: "; find(99, btab, 5, $01); print "^";
+  @quit;
+];

@@ -1,0 +1,23 @@
+! Target: v3
+!
+! Arithmetic and print formatting.  The operands live in locals so the
+! compiler cannot fold them: grue's own opcodes do the work.  Signed
+! 16-bit results, division truncating toward zero, modulo taking the
+! sign of the dividend, and the overflow wrap are all fixed by the
+! Z-machine standard, so the output is exact and fizmo-console serves
+! as the oracle.
+[ Main a b;
+  a = 2;                  print "sum=", a+a, "^";
+  a = 3; b = 10;          print "neg=", a-b, "^";
+  a = -4; b = 5;          print "mul=", a*b, "^";
+  a = -17; b = 5;         print "div=", a/b, "^";   ! toward zero: -3
+  a = -17; b = 5;         print "mod=", a%b, "^";   ! sign of a: -2
+  a = 32767;              print "wrap=", a+1, "^";  ! overflow: -32768
+  a = $00ff; b = $0f0f;   print "and=", a&b, "^";
+  a = $00f0; b = $0f00;   print "or=", a|b, "^";
+  @print_char 'A';
+  @print_char 'Z';
+  @new_line;
+  print "done.^";
+  @quit;
+];

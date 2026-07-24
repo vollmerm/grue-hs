@@ -1,0 +1,10 @@
+box is in the desk
+first in box: lamp
+next to it: coin
+coin in box? yes
+coin in desk? no
+lamp lit? yes
+lamp lit? no
+coin still in box? no
+box's first is now the lamp
+coin now in the desk
