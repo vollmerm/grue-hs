@@ -11,6 +11,7 @@ module Grue.VM
   , Frame (..)
   , PendingInput (..)
   , boot
+  , bootWithSeed
 
     -- * Variables
   , readVar
@@ -150,15 +151,24 @@ data VM = VM
   }
   deriving (Eq, Show)
 
--- | Build the initial machine state from story file bytes.
+-- | Build the initial machine state from story file bytes, seeding the
+-- random number generator with a fixed value so that runs are
+-- reproducible.
 boot :: ByteString -> VM
-boot story =
+boot = bootWithSeed 0x2a
+
+-- | Build the initial machine state with an explicit random seed.
+-- Frontends pass a seed drawn from the environment for genuine
+-- unpredictability during play; the fixed-seed 'boot' keeps tests and
+-- transcripts deterministic.
+bootWithSeed :: Word64 -> ByteString -> VM
+bootWithSeed seed story =
   VM
     { vmMemory = mem
     , vmHeader = hdr
     , vmPC = initialPC hdr
     , vmFrames = baseFrame :| []
-    , vmRng = seededRng 0x2a
+    , vmRng = seededRng seed
     , vmOutput = []
     , vmTranscript = []
     , vmWindow = 0
