@@ -87,8 +87,8 @@ data Frame = Frame
 
 -- | A paused request that the frontend must complete: a line of
 -- player input, or the file transfer for a save or restore.  The save
--- and restore cases remember the instruction's branch so the outcome
--- can be reported to the story.
+-- and restore cases remember how their outcome is reported back to the
+-- story.
 data PendingInput
   = PendingRead
       -- | Byte address of the text buffer.
@@ -98,8 +98,10 @@ data PendingInput
   | -- | A single keypress for @read_char@; the store variable receives
     -- the ZSCII code.
     PendingReadChar Word8
-  | PendingSave Branch
-  | PendingRestore Branch
+  | PendingSaveBranch Branch
+  | PendingSaveStore Int Word8
+  | PendingRestoreBranch Branch
+  | PendingRestoreStore Word8
   deriving (Eq, Show)
 
 -- | The upper window: a fixed region at the top of the screen the story

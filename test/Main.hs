@@ -720,6 +720,12 @@ instructionV5Cases =
                 Nothing
             , 70
             )
+  , testCase "version 5 save stores instead of branching" $
+      decodeAtVersion 5 [0xb5, 0x10]
+        @?= (Instruction Save [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 restore stores instead of branching" $
+      decodeAtVersion 5 [0xb6, 0x10]
+        @?= (Instruction Restore [] (Just 0x10) Nothing Nothing, 66)
   ]
 
 -- | Boot a story assembled from segments of bytes at absolute
@@ -842,6 +848,31 @@ interpTests =
     , testCase "art_shift preserves the sign bit" $
         runProgVersion 5 [0xbe, 0x03, 0x0f, 0xff, 0xff, 0xff, 0xfc, 0x10, 0xe6, 0xbf, 0x10, 0xba]
           @?= ("-1", Halted)
+    , testCase "version 5 save stores 0 or 1 at the save site" $ do
+        let prog = [0xb5, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            saveRequest = case run (bootProgVersion 5 [(64, prog)]) of
+              (_, SaveRequested _, pending) -> pending
+              (_, other, _) -> error ("expected save request, got " ++ show other)
+            (outFail, stopFail, _) = run (finishSave False saveRequest)
+            (outOk, stopOk, _) = run (finishSave True saveRequest)
+        (outFail, stopFail) @?= ("0", Halted)
+        (outOk, stopOk) @?= ("1", Halted)
+    , testCase "version 5 restore resumes a save with result 2" $ do
+        let prog = [0xb6, 0x11, 0xb5, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            vm0 = bootProgVersion 5 [(64, prog)]
+            pendingRestore = case run vm0 of
+              (_, RestoreRequested, pending) -> pending
+              (_, other, _) -> error ("expected restore request, got " ++ show other)
+            (saveBytes, pendingSave) = case run (finishRestore Nothing pendingRestore) of
+              (_, SaveRequested bytes, pending) -> (bytes, pending)
+              (_, other, _) -> error ("expected save request, got " ++ show other)
+            (_, _, afterSave) = run (finishSave True pendingSave)
+            pendingRestore2 = case run vm0 of
+              (_, RestoreRequested, pending) -> pending
+              (_, other, _) -> error ("expected restore request, got " ++ show other)
+            (out, stop, _) = run (finishRestore (Just saveBytes) pendingRestore2)
+        frameEval (NE.head (vmFrames afterSave)) @?= []
+        (out, stop) @?= ("2", Halted)
     , testCase "output stream 3 redirects into memory" $ do
         -- Select a table at 0x180, print "hi" (redirected), deselect,
         -- then print "hi" again to the screen.

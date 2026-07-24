@@ -75,9 +75,9 @@ run vm0 = case runState step vm0 of
 step :: Z (Maybe Stop)
 step = do
   vm <- get
-  let (inst, next) = decode (vmMemory vm) (vmHeader vm) (vmPC vm)
+  let (inst, storeAt, next) = decodeForExec (vmMemory vm) (vmHeader vm) (vmPC vm)
   put vm {vmPC = next}
-  exec inst
+  exec storeAt inst
 
 -- | The value of an operand.  Reading a variable operand may pop the
 -- evaluation stack, so operands are evaluated left to right.
@@ -172,8 +172,8 @@ output t = do
       put vm {vmMemory = mem, vmTables = (table, count + length codes) : rest}
 
 -- | Execute one decoded instruction.
-exec :: Instruction -> Z (Maybe Stop)
-exec (Instruction op operands st br text) = case op of
+exec :: Maybe Int -> Instruction -> Z (Maybe Stop)
+exec storeAt (Instruction op operands st br text) = case op of
   -- Comparisons and jumps
   Je -> branchy $ \vs -> case vs of
     (a : others) -> pure (a `elem` others)
@@ -383,17 +383,25 @@ exec (Instruction op operands st br text) = case op of
       gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
   Quit -> pure (Just Halted)
   Restart -> continue $ modify restart
-  Save -> case br of
-    Nothing -> continue (pure ())
-    Just b -> do
-      vm <- get
-      put vm {vmPending = Just (PendingSave b)}
-      pure (Just (SaveRequested (saveState vm (branchAt b))))
-  Restore -> case br of
-    Nothing -> continue (pure ())
-    Just b -> do
-      modify (\vm -> vm {vmPending = Just (PendingRestore b)})
-      pure (Just RestoreRequested)
+  Save
+    | Just b <- br -> do
+        vm <- get
+        put vm {vmPending = Just (PendingSaveBranch b)}
+        pure (Just (SaveRequested (saveState vm (branchAt b))))
+    | Just var <- st
+    , Just resumePC <- storeAt -> do
+        vm <- get
+        put vm {vmPending = Just (PendingSaveStore resumePC var)}
+        pure (Just (SaveRequested (saveState vm resumePC)))
+    | otherwise -> continue (pure ())
+  Restore
+    | Just b <- br -> do
+        modify (\vm -> vm {vmPending = Just (PendingRestoreBranch b)})
+        pure (Just RestoreRequested)
+    | Just var <- st -> do
+        modify (\vm -> vm {vmPending = Just (PendingRestoreStore var)})
+        pure (Just RestoreRequested)
+    | otherwise -> continue (pure ())
   -- Display control
   ShowStatus -> continue (pure ())
   SplitWindow -> continue (val1 >>= modify . splitUpper . fromIntegral)
@@ -516,21 +524,26 @@ exec (Instruction op operands st br text) = case op of
       | places >= 0 = n `shiftL` places
       | otherwise = n `div` (2 ^ negate places)
 
--- | Report whether the requested save was written.  The story sees
--- the outcome through the @save@ instruction's branch.
+-- | Report whether the requested save was written.  Versions 3 and 4
+-- see the outcome through the @save@ instruction's branch; version 5
+-- stores 0 or 1 in the instruction's result variable.
 finishSave :: Bool -> VM -> VM
 finishSave ok vm = case vmPending vm of
-  Just (PendingSave b) ->
+  Just (PendingSaveBranch b) ->
     execState (branchOn (Just b) ok) vm {vmPending = Nothing}
+  Just (PendingSaveStore _ var) ->
+    writeVar var (if ok then 1 else 0) vm {vmPending = Nothing}
   _ -> error "Grue.Interp.finishSave: no save is pending"
 
 -- | Complete a requested restore with the bytes of a save file (or
 -- 'Nothing' if none could be read).  On success the machine resumes
--- from the moment of the original save, with its branch taken as
--- true; on any failure the @restore@ instruction's branch reports it.
+-- from the moment of the original save, taking that saved @save@
+-- instruction's success path (or storing 2 for version 5).  On
+-- failure, the pending @restore@ reports 0 or false according to the
+-- story version.
 finishRestore :: Maybe ByteString -> VM -> VM
 finishRestore mbytes vm = case vmPending vm of
-  Just (PendingRestore b) ->
+  Just (PendingRestoreBranch b) ->
     case attempt =<< mbytes of
       Just restored -> restored
       Nothing -> execState (branchOn (Just b) False) failed
@@ -558,7 +571,45 @@ finishRestore mbytes vm = case vmPending vm of
               , vmBeeps = vmBeeps vm
               , vmRng = vmRng vm
               }
+  Just (PendingRestoreStore var) ->
+    case attempt =<< mbytes of
+      Just restored -> restored
+      Nothing -> writeVar var 0 failed
+    where
+      failed = vm {vmPending = Nothing}
+      attempt bytes = case restoreState story bytes of
+        Left _ -> Nothing
+        Right fresh -> Just (resume fresh)
+      story = originalBytes (vmMemory vm)
+      resume fresh = resumeAfterSave vm fresh
   _ -> error "Grue.Interp.finishRestore: no restore is pending"
+
+-- | Resume a restored machine from the point of the original @save@.
+resumeAfterSave :: VM -> VM -> VM
+resumeAfterSave running fresh = case zVersion (vmHeader fresh) of
+  v
+    | v <= 4 -> execState (branchOn (Just b) True) prepared
+    | otherwise -> writeVar var 2 prepared {vmPC = pc + 1}
+  where
+    pc = vmPC fresh
+    mem = vmMemory fresh
+    (b, after) = decodeBranch mem pc
+    var = peekByte mem pc
+    -- The transcript and fixed-pitch bits of Flags 2 survive a restore,
+    -- as the standard requires; output and randomness carry over from the
+    -- running machine.
+    flags2 =
+      peekWord mem 0x10 .&. complement 0x3
+        .|. (peekWord (vmMemory running) 0x10 .&. 0x3)
+    prepared =
+      fresh
+        { vmPC = after
+        , vmMemory = pokeWord 0x10 flags2 mem
+        , vmOutput = vmOutput running
+        , vmTranscript = vmTranscript running
+        , vmBeeps = vmBeeps running
+        , vmRng = vmRng running
+        }
 
 -- | Finish the innermost memory output stream: record the character
 -- count in the table's first word, as @output_stream -3@ requires.

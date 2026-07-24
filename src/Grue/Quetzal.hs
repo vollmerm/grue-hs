@@ -25,8 +25,9 @@ import Grue.Memory
 import Grue.VM
 
 -- | Serialize the machine into a Quetzal save.  The given address is
--- where execution resumes on restore: in versions 3 and 4, the branch
--- data of the @save@ instruction being executed.
+-- where execution resumes on restore: the branch data of the active
+-- @save@ in versions 3 and 4, or the store byte of that instruction in
+-- version 5.
 saveState :: VM -> Int -> ByteString
 saveState vm resumePC =
   form
