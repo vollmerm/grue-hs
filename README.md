@@ -36,11 +36,13 @@ To run a single test or group, pass a [tasty](https://hackage.haskell.org/packag
 cabal run grue-test -- -p Quetzal
 ```
 
-The second check is byte-for-byte transcript comparison against a reference interpreter. `tools/compare.sh` runs both grue-hs and `fizmo-console` over the same walkthrough script (see `tools/walkthroughs/`) and diffs the output:
+The second check is byte-for-byte transcript comparison against a reference interpreter. `tools/compare.sh` runs both grue-hs and `fizmo-console` over the same walkthrough script and diffs the output. Each walkthrough is written for one story and takes it as the first argument; the bundled `cloak.z3` has one you can run out of the box:
 
 ```
-tools/compare.sh STORY.z3 tools/walkthroughs/minizork.txt
+tools/compare.sh test/stories/cloak.z3 tools/walkthroughs/cloak.txt
 ```
+
+The other walkthroughs in `tools/walkthroughs/` (`zork1`, `minizork`, `advent`) target commercial Infocom stories that aren't distributed here; run them by supplying your own copy of the matching story file.
 
 Walkthroughs stick to deterministic commands, since responses chosen at random (combat, snarky refusals) vary between runs of the reference interpreter itself.
 
