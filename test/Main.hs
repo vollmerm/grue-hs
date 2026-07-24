@@ -6,8 +6,10 @@ module Main (main) where
 import Data.Bits (testBit)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
+import Data.List (sort)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8)
 import Data.Word (Word16, Word8)
 import Grue.Dictionary
 import Grue.Header
@@ -17,18 +19,21 @@ import Grue.Memory
 import Grue.Object qualified as Obj
 import Grue.VM
 import Grue.ZString
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.FilePath (dropExtension, takeExtension, (</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
 main :: IO ()
-main = defaultMain . tests =<< loadStories
+main = do
+  stories <- loadStories
+  precise <- loadPrecise
+  defaultMain (tests stories precise)
 
-tests :: [Story] -> TestTree
-tests stories =
+tests :: [Story] -> [Precise] -> TestTree
+tests stories precise =
   testGroup
     "grue-hs"
     [ memoryTests
@@ -39,6 +44,7 @@ tests stories =
     , instructionTests
     , interpTests
     , conformanceTests
+    , preciseTests precise
     , storyTests stories
     ]
 
@@ -946,6 +952,82 @@ conformanceTests =
       assertBool
         ("expected " ++ show summary ++ " in czech output")
         (summary `T.isInfixOf` out)
+
+-- | A precise input\/output fixture: a purpose-built story compiled
+-- from Inform 6 source (see @tools\/build-tests.sh@), the scripted
+-- input to feed it, and the exact output it must print (frozen from a
+-- reference interpreter by @tools\/gen-expected.sh@).
+data Precise = Precise
+  { preciseName :: FilePath
+  -- ^ The story's file name, used as the test label.
+  , preciseStory :: BS.ByteString
+  , preciseInput :: T.Text
+  , preciseExpected :: T.Text
+  }
+
+-- | Where the precise-test stories live, relative to the repository.
+preciseDir :: FilePath
+preciseDir = "test" </> "stories" </> "precise"
+
+-- | Load every compiled story under 'preciseDir' together with its
+-- input (@.in@, empty if absent) and expected output (@.out@).
+loadPrecise :: IO [Precise]
+loadPrecise = mapM load . sort . filter isStory =<< listDirectory preciseDir
+  where
+    isStory n = takeExtension n `elem` [".z3", ".z4"]
+    load n = do
+      let base = preciseDir </> dropExtension n
+      story <- BS.readFile (preciseDir </> n)
+      input <- readTextIfPresent (base <> ".in")
+      expected <- decodeUtf8 <$> BS.readFile (base <> ".out")
+      pure (Precise n story input expected)
+    readTextIfPresent path = do
+      present <- doesFileExist path
+      if present then decodeUtf8 <$> BS.readFile path else pure T.empty
+
+-- | Drive a booted machine over a scripted input stream exactly as the
+-- console frontend does, and return the text it prints.  Input is not
+-- echoed; each 'NeedInput' consumes one line and each 'NeedChar' one
+-- character, and running out of input ends the run as end-of-file
+-- would.  Save and restore requests are answered as a successful save
+-- and a declined restore, enough to step through those paths without a
+-- file system.
+playScript :: VM -> T.Text -> T.Text
+playScript = go True T.empty
+  where
+    go atLineStart acc vm input =
+      let (out, stop, vm') = run vm
+          acc' = acc <> out
+          atLineStart' = if T.null out then atLineStart else T.last out == '\n'
+       in case stop of
+            Halted -> finish atLineStart' acc'
+            SaveRequested _ -> go atLineStart' acc' (finishSave True vm') input
+            RestoreRequested -> go atLineStart' acc' (finishRestore Nothing vm') input
+            NeedInput
+              | T.null input -> finish atLineStart' acc'
+              | otherwise ->
+                  let (line, rest) = breakLine input
+                   in go atLineStart' acc' (provideInput (T.strip line) vm') rest
+            NeedChar -> case T.uncons input of
+              Nothing -> finish atLineStart' acc'
+              Just (c, rest) -> go atLineStart' acc' (provideChar (charZscii c) vm') rest
+    finish atLineStart acc
+      | atLineStart = acc
+      | otherwise = acc <> "\n"
+    breakLine t = let (line, rest) = T.break (== '\n') t in (line, T.drop 1 rest)
+    charZscii c = if c == '\n' then 13 else fromIntegral (fromEnum c)
+
+-- | Precise input\/output tests: each purpose-built story is driven
+-- over its scripted input and its printed output must match the frozen
+-- expected transcript exactly.
+preciseTests :: [Precise] -> TestTree
+preciseTests fixtures =
+  testGroup "precise stories" (map preciseTest fixtures)
+  where
+    preciseTest fx =
+      testCase (preciseName fx) $
+        playScript (boot (preciseStory fx)) (preciseInput fx)
+          @?= preciseExpected fx
 
 -- | Checks against real story files found on this machine.
 storyTests :: [Story] -> TestTree

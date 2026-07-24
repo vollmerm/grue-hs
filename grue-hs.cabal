@@ -14,6 +14,11 @@ extra-source-files: test/stories/cloak.z3
                     test/stories/czech.z3
                     test/stories/czech.z4
                     test/stories/czech-LICENSE.txt
+                    test/stories/precise/*.inf
+                    test/stories/precise/*.z3
+                    test/stories/precise/*.z4
+                    test/stories/precise/*.in
+                    test/stories/precise/*.out
 
 source-repository head
     type:     git
