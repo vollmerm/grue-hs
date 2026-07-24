@@ -45,7 +45,7 @@ readDictionary mem hdr = readDictionaryAt mem hdr (dictionaryAddr hdr)
 
 -- | Read the layout of a dictionary rooted at the given byte address.
 readDictionaryAt :: Memory -> Header -> Int -> Dictionary
-readDictionaryAt mem _hdr base =
+readDictionaryAt mem hdr base =
   Dictionary
     { dictSeparators = seps
     , dictEntryLength = fromIntegral (peekByte mem (base + 1 + n))
@@ -55,7 +55,7 @@ readDictionaryAt mem _hdr base =
   where
     n = fromIntegral (peekByte mem base)
     codes = [peekByte mem (base + 1 + i) | i <- [0 .. n - 1]]
-    seps = mapMaybe (zsciiToChar . fromIntegral) codes
+    seps = mapMaybe (zsciiToCharInStory mem hdr . fromIntegral) codes
     signedCount raw
       | raw < 0x8000 = fromIntegral raw
       | otherwise = fromIntegral raw - 0x10000
@@ -80,7 +80,7 @@ lookupWord mem hdr dict word
   | dictEntryCount dict < 0 = entryAddr dict <$> findUnsorted 0
   | otherwise = go 0 (entryTotal dict - 1)
   where
-    key = encodeWord hdr word
+    key = encodeWordInStory mem hdr word
     go lo hi
       | lo > hi = Nothing
       | otherwise = case compare key (entryKey mem hdr dict mid) of

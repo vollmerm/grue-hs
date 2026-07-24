@@ -24,7 +24,7 @@ import Control.Monad (unless, void)
 import Control.Monad.State
 import Data.Bits (complement, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
-import Data.Char (chr, toLower)
+import Data.Char (toLower)
 import Data.Int (Int16)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -166,7 +166,7 @@ output t = do
       | otherwise ->
           put (emit t (if transcriptOn vm then emitTranscript t vm else vm))
     (table, count) : rest -> do
-      let codes = mapMaybe charToZscii (T.unpack t)
+      let codes = mapMaybe (charToZsciiInStory (vmMemory vm) (vmHeader vm)) (T.unpack t)
           place i code = pokeByte (table + 2 + count + i) (fromIntegral code)
           mem = foldr (uncurry place) (vmMemory vm) (zip [0 ..] codes)
       put vm {vmMemory = mem, vmTables = (table, count + length codes) : rest}
@@ -308,7 +308,8 @@ exec storeAt (Instruction op operands st br text) = case op of
   NewLine -> continue $ output "\n"
   PrintChar -> continue $ do
     code <- val1
-    output (maybe T.empty T.singleton (zsciiToChar code))
+    vm <- get
+    output (maybe T.empty T.singleton (zsciiToCharInStory (vmMemory vm) (vmHeader vm) code))
   PrintNum -> continue $ do
     n <- val1
     output (T.pack (show (signed n)))
@@ -425,8 +426,8 @@ exec storeAt (Instruction op operands st br text) = case op of
   Tokenise -> continue $ do
     vals <- values operands
     case vals of
-      [tbuf, pbuf] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) 0 0
-      [tbuf, pbuf, dict] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) dict 0
+      [tbuf, pbuf] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) (0 :: Word16) (0 :: Word16)
+      [tbuf, pbuf, dict] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) dict (0 :: Word16)
       [tbuf, pbuf, dict, flag] ->
         tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) dict flag
       _ -> badOperands
@@ -434,11 +435,11 @@ exec storeAt (Instruction op operands st br text) = case op of
     (src, len, from, dst) <- val4
     vm <- get
     let hdr = vmHeader vm
-        text =
+        zscii =
           [ fromIntegral (peekByte (vmMemory vm) (fromIntegral src + fromIntegral from + i))
           | i <- [0 .. fromIntegral len - 1]
           ]
-        words' = encodeText hdr text
+        words' = encodeText (vmMemory vm) hdr zscii
         bytes = concatMap wordBytes words'
         mem =
           foldr
@@ -598,7 +599,7 @@ exec storeAt (Instruction op operands st br text) = case op of
           rowText row =
             T.pack $
               mapMaybe
-                (zsciiToChar . fromIntegral . peekByte mem)
+                (zsciiToCharInStory mem (vmHeader vm) . fromIntegral . peekByte mem)
                 [table + row * (width + skip) + col | col <- [0 .. width - 1]]
           rendered =
             T.intercalate "\n" [rowText row | row <- [0 .. height - 1]]
@@ -764,7 +765,7 @@ enteredLine hdr mem tbuf input
     existing =
       T.pack $
         mapMaybe
-          (zsciiToChar . fromIntegral . peekByte mem)
+          (zsciiToCharInStory mem hdr . fromIntegral . peekByte mem)
           [tbuf + 2 + i | i <- [0 .. existingCount - 1]]
     typed = T.map toLower (T.take (maxLetters - existingCount) input)
 
@@ -778,7 +779,7 @@ writeTextBuffer mem hdr tbuf line
   | otherwise =
       pokeByte (tbuf + 1 + length codes) 0 textWrites
   where
-    codes = mapMaybe charToZscii (T.unpack line)
+    codes = mapMaybe (charToZsciiInStory mem hdr) (T.unpack line)
     textWrites =
       foldr
         (\(i, c) -> pokeByte (tbuf + 1 + i) (fromIntegral c))
@@ -790,14 +791,16 @@ readTextBuffer mem hdr tbuf
   | zVersion hdr >= 5 =
       T.pack $
         mapMaybe
-          (zsciiToChar . fromIntegral . peekByte mem)
+          (zsciiToCharInStory mem hdr . fromIntegral . peekByte mem)
           [tbuf + 2 + i | i <- [0 .. count - 1]]
   | otherwise =
-      T.pack $
-        takeWhile (/= '\NUL') $
-          map (chr . fromIntegral . peekByte mem) [tbuf + 1 ..]
+      T.pack (go (tbuf + 1))
   where
     count = fromIntegral (peekByte mem (tbuf + 1))
+    go addr
+      | peekByte mem addr == 0 = []
+      | otherwise =
+          maybe id (:) (zsciiToCharInStory mem hdr (fromIntegral (peekByte mem addr))) (go (addr + 1))
 
 writeParseBuffer :: Memory -> Header -> Dictionary -> Int -> Word16 -> Text -> Memory
 writeParseBuffer mem hdr dict pbuf flag line = counted

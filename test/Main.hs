@@ -225,6 +225,9 @@ syntheticStory =
     , (0x0c, 0x0102) -- globals
     , (0x0e, 0x0442) -- static memory base
     , (0x18, 0x0040) -- abbreviations
+    , (0x2e, 0x0456) -- terminating characters
+    , (0x34, 0x0789) -- alphabet table
+    , (0x36, 0x09ab) -- header extension table
     , (0x1a, 40) -- file length, stored divided by 2 in version 3
     , (0x1c, 0xbeef) -- checksum
     ]
@@ -233,6 +236,16 @@ syntheticStory =
 -- | Split a 16-bit word into big-endian bytes.
 wordBytes :: Word16 -> [Word8]
 wordBytes w = [fromIntegral (w `div` 256), fromIntegral (w `mod` 256)]
+
+placeBytes :: Int -> [Word8] -> Memory -> Memory
+placeBytes addr bytes mem =
+  foldr (\(i, b) -> pokeByte i b) mem (zip [addr ..] bytes)
+
+zsciiBytes :: String -> [Word8]
+zsciiBytes = map encode
+  where
+    encode '\n' = 13
+    encode c = fromIntegral (fromEnum c)
 
 headerTests :: TestTree
 headerTests =
@@ -248,6 +261,9 @@ headerTests =
         globalsAddr hdr @?= 0x0102
         staticBase hdr @?= 0x0442
         abbreviationsAddr hdr @?= 0x0040
+        terminatingCharsAddr hdr @?= 0x0456
+        alphabetTableAddr hdr @?= 0x0789
+        headerExtTableAddr hdr @?= 0x09ab
         fileLength hdr @?= 80
         checksum hdr @?= 0xbeef
     , testCase "packed addresses double in version 3" $ do
@@ -308,6 +324,32 @@ zstringTests =
         zsciiToChar 161 @?= Just 'ß'
         zsciiToChar 223 @?= Just '¿'
         zsciiToChar 224 @?= Nothing
+    , testCase "version 5 custom alphabet tables round-trip story text" $ do
+        let base =
+              mkStoryVersion 5 [(0x34, 0x80)] (replicate 256 0)
+            alphabetTable =
+              concatMap
+                zsciiBytes
+                [ "@bcdefghijklmnopqrstuvwxyz"
+                , "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                , " \n0123456789.,!?_#'\"/\\-:()"
+                ]
+            mem0 = placeBytes 0x80 alphabetTable base
+            hdr = readHeader mem0
+            encoded = encodeWordInStory mem0 hdr "@"
+            mem = placeBytes 0x100 (concatMap wordBytes encoded) mem0
+        decodeStringAt mem hdr 0x100 @?= "@"
+    , testCase "version 5 custom Unicode tables map extra ZSCII codes" $ do
+        let mem =
+              foldr
+                (uncurry placeBytes)
+                (mkStoryVersion 5 [(0x36, 0x90)] (replicate 256 0))
+                [ (0x90, wordBytes 3 ++ wordBytes 0 ++ wordBytes 0 ++ wordBytes 0xa0)
+                , (0xa0, 1 : wordBytes 0x03a9)
+                ]
+            hdr = readHeader mem
+        zsciiToCharInStory mem hdr 155 @?= Just '\x03A9'
+        charToZsciiInStory mem hdr '\x03A9' @?= Just 155
     , testCase "encodeWord matches the standard's worked example" $ do
         let v4Header = (readHeader syntheticStory) {zVersion = 4}
         encodeWord v4Header "i" @?= [0x38a5, 0x14a5, 0x94a5]
@@ -370,6 +412,23 @@ dictionaryTests =
     , testCase "tokenize of empty input is empty" $ do
         let dict = readDictionary dictStory (readHeader dictStory)
         tokenize dict "   " @?= []
+    , testCase "version 5 dictionary separators use the story Unicode table" $ do
+        let dict =
+              [1, 155, 9, 0, 1]
+                ++ concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) "go")
+                ++ [0, 0, 0]
+            mem =
+              foldr
+                (uncurry placeBytes)
+                (mkStoryVersion 5 [(0x08, 64), (0x36, 0x90)] (replicate 256 0))
+                [ (64, dict)
+                , (0x90, wordBytes 3 ++ wordBytes 0 ++ wordBytes 0 ++ wordBytes 0xa0)
+                , (0xa0, 1 : wordBytes 0x03a9)
+                ]
+            hdr = readHeader mem
+            input = T.pack ['g', 'o', '\x03A9', 'e', 'a', 's', 't']
+        tokenize (readDictionary mem hdr) input
+          @?= [(0, "go"), (2, "\x03A9"), (3, "east")]
     ]
 
 -- | A story with a three-object tree at address 64: object 1 ("box")
