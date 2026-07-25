@@ -12,6 +12,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Word (Word64)
 import Files
+import Grue.Header (zVersion)
 import Grue.Interp
 import Grue.Memory (peekByte)
 import Grue.VM
@@ -111,10 +112,11 @@ renderUpperPrefix col prev next out vm
   | null fresh = T.empty
   | otherwise = T.unlines fresh
   where
-    fresh = filter (not . (`T.isInfixOf` out)) next
+    fresh = filter (not . rowShownIn out) next
 
 renderUpperPrompt :: Int -> [T.Text] -> VM -> T.Text
 renderUpperPrompt col rows vm
+  | zVersion (vmHeader vm) < 5 = T.empty
   | null rows = T.empty
   | otherwise = renderInlineUpper col rows vm
 
@@ -122,7 +124,7 @@ renderInlineUpper :: Int -> [T.Text] -> VM -> T.Text
 renderInlineUpper _ [] _ = T.empty
 renderInlineUpper col rows vm =
   padToBoundary col width
-    <> go rows
+    <> go (flattenInlineRows rows)
   where
     width = consoleWidth vm
     go :: [T.Text] -> T.Text
@@ -132,6 +134,54 @@ renderInlineUpper col rows vm =
       row
         <> padToBoundary (T.length row) width
         <> go rest
+
+flattenInlineRows :: [T.Text] -> [T.Text]
+flattenInlineRows rows =
+  case traverse splitStatusFields rows of
+    Just fieldsRows@(fields0 : _)
+      | allSame (map length fieldsRows)
+      , let fieldCount = length fields0
+      , even fieldCount
+      , fieldCount >= 4 ->
+          [ T.concat (concatMap labelFields fieldsRows)
+              <> T.intercalate valueGap (concatMap valueFields fieldsRows)
+          ]
+    _ -> rows
+  where
+    valueGap = T.replicate 3 (T.singleton ' ')
+    labelFields = pickParity 0
+    valueFields = pickParity 1
+    pickParity parity =
+      map snd
+        . filter ((== parity) . (`mod` 2) . fst)
+        . zip [0 :: Int ..]
+
+rowShownIn :: T.Text -> T.Text -> Bool
+rowShownIn out row =
+  let trimmed = T.strip row
+   in not (T.null trimmed) && trimmed `T.isInfixOf` out
+
+splitStatusFields :: T.Text -> Maybe [T.Text]
+splitStatusFields row
+  | null fields = Nothing
+  | otherwise = Just fields
+  where
+    fields = go (T.strip row)
+    go t
+      | T.null t = []
+      | otherwise =
+          let (field, rest) = breakGap t
+           in field : go (T.dropWhile (== ' ') rest)
+    breakGap t =
+      case T.breakOn gap t of
+        (field, rest)
+          | T.null rest -> (field, T.empty)
+          | otherwise -> (field, T.dropWhile (== ' ') rest)
+    gap = T.replicate 2 (T.singleton ' ')
+
+allSame :: (Eq a) => [a] -> Bool
+allSame [] = True
+allSame (x : xs) = all (== x) xs
 
 consoleWidth :: VM -> Int
 consoleWidth vm =
