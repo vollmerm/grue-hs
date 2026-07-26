@@ -7,13 +7,17 @@
 module Console (play) where
 
 import Data.ByteString qualified as BS
+import Data.Foldable (toList)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Word (Word64)
 import Files
+import Grue.Header (zVersion)
 import Grue.Interp
+import Grue.Memory (peekByte)
 import Grue.VM
-import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hSetBuffering, stdin, stdout)
+import Grue.ZString (charToZsciiInStory)
+import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hIsTerminalDevice, hSetBuffering, stdin, stdout)
 
 -- | Run the story, flushing output and feeding input until it halts.
 -- The transcript always ends with a newline, so a final prompt does
@@ -21,45 +25,182 @@ import System.IO (BufferMode (NoBuffering), hGetChar, hIsEOF, hSetBuffering, std
 play :: Word64 -> BS.ByteString -> IO ()
 play seed story = do
   hSetBuffering stdout NoBuffering
-  loop True NotAsked (bootWithSeed seed story)
+  loop 0 NotAsked emptyUpper (bootWithSeed seed story)
   where
-    loop atLineStart script vm = do
+    loop col script prevUpper vm = do
       let (out, stop, vm') = run vm
+          nextUpper = upperSnapshot vm'
+          prefix = renderUpperPrefix col prevUpper nextUpper out vm'
+      TIO.putStr prefix
       TIO.putStr out
       let (scriptText, vm'') = takeTranscript vm'
       script' <- flushScript script scriptText
-      let atLineStart' =
-            if T.null out then atLineStart else T.last out == '\n'
+      let col' = advanceColumn (advanceColumn col prefix) out
       case stop of
-        Halted -> finish atLineStart'
+        Halted -> finish col'
         NeedInput ->
-          withLine (finish atLineStart') $ \line ->
-            loop atLineStart' script' (provideInput (T.strip line) vm'')
+          let suffix = renderUpperPrompt col' nextUpper vm''
+              col'' = advanceColumn col' suffix
+           in do
+                TIO.putStr suffix
+                withInputLine vm'' (finish col'') $ \(line, term) -> do
+                  newline <- needsInputNewline term
+                  if newline then putStrLn "" else pure ()
+                  loop (if newline then 0 else col'') script' nextUpper (provideInputTerminated term line vm'')
         NeedChar -> do
           eof <- hIsEOF stdin
           if eof
-            then finish atLineStart'
+            then finish col'
             else do
               c <- hGetChar stdin
-              loop atLineStart' script' (provideChar (charZscii c) vm'')
+              loop col' script' nextUpper (provideChar (charZscii c) vm'')
         SaveRequested bytes -> do
           putStr "Save to file: "
-          withLine (loop True script' (finishSave False vm'')) $ \name -> do
+          withLine (loop 0 script' nextUpper (finishSave False vm'')) $ \name -> do
             ok <- writeSave name bytes
-            loop True script' (finishSave ok vm'')
+            loop 0 script' nextUpper (finishSave ok vm'')
         RestoreRequested -> do
           putStr "Restore from file: "
-          withLine (loop True script' (finishRestore Nothing vm'')) $ \name -> do
+          withLine (loop 0 script' nextUpper (finishRestore Nothing vm'')) $ \name -> do
             bytes <- readSave name
-            loop True script' (finishRestore bytes vm'')
-    finish atLineStart =
-      if atLineStart then pure () else putStrLn ""
+            loop 0 script' nextUpper (finishRestore bytes vm'')
+    finish col' =
+      if col' == 0 then pure () else putStrLn ""
     withLine onEOF act = do
       eof <- hIsEOF stdin
       if eof then onEOF else act =<< TIO.getLine
+    withInputLine vm onEOF act = do
+      eof <- hIsEOF stdin
+      if eof then onEOF else act =<< readInputLine vm
+    readInputLine vm = go T.empty
+      where
+        hdr = vmHeader vm
+        mem = vmMemory vm
+        terminators = inputTerminators vm
+        go acc = do
+          eof <- hIsEOF stdin
+          if eof
+            then pure (acc, 13)
+            else do
+              c <- hGetChar stdin
+              case charToZsciiInStory mem hdr c of
+                Just code
+                  | code `elem` terminators -> pure (acc, code)
+                _ -> go (acc <> T.singleton c)
+    needsInputNewline term
+      | term == 13 = pure False
+      | otherwise = hIsTerminalDevice stdin
     -- read_char consumes a single byte, so scripted input stays in step
     -- with the reference interpreter.  A newline becomes ZSCII 13.
     charZscii c = if c == '\n' then 13 else fromIntegral (fromEnum c)
+
+emptyUpper :: [T.Text]
+emptyUpper = []
+
+upperSnapshot :: VM -> [T.Text]
+upperSnapshot =
+  filter (not . T.null . T.strip)
+    . map T.stripEnd
+    . toList
+    . upperLines
+    . vmUpper
+
+renderUpperPrefix :: Int -> [T.Text] -> [T.Text] -> T.Text -> VM -> T.Text
+renderUpperPrefix col prev next out vm
+  | next == prev = T.empty
+  | col /= 0 = renderInlineUpper col next vm
+  | null fresh = T.empty
+  | otherwise = T.unlines fresh
+  where
+    fresh = filter (not . rowShownIn out) next
+
+renderUpperPrompt :: Int -> [T.Text] -> VM -> T.Text
+renderUpperPrompt col rows vm
+  | zVersion (vmHeader vm) < 5 = T.empty
+  | null rows = T.empty
+  | otherwise = renderInlineUpper col rows vm
+
+renderInlineUpper :: Int -> [T.Text] -> VM -> T.Text
+renderInlineUpper _ [] _ = T.empty
+renderInlineUpper col rows vm =
+  padToBoundary col width
+    <> go (flattenInlineRows rows)
+  where
+    width = consoleWidth vm
+    go :: [T.Text] -> T.Text
+    go [] = T.empty
+    go [row] = row
+    go (row : rest) =
+      row
+        <> padToBoundary (T.length row) width
+        <> go rest
+
+flattenInlineRows :: [T.Text] -> [T.Text]
+flattenInlineRows rows =
+  case traverse splitStatusFields rows of
+    Just fieldsRows@(fields0 : _)
+      | allSame (map length fieldsRows)
+      , let fieldCount = length fields0
+      , even fieldCount
+      , fieldCount >= 4 ->
+          [ T.concat (concatMap labelFields fieldsRows)
+              <> T.intercalate valueGap (concatMap valueFields fieldsRows)
+          ]
+    _ -> rows
+  where
+    valueGap = T.replicate 3 (T.singleton ' ')
+    labelFields = pickParity 0
+    valueFields = pickParity 1
+    pickParity parity =
+      map snd
+        . filter ((== parity) . (`mod` 2) . fst)
+        . zip [0 :: Int ..]
+
+rowShownIn :: T.Text -> T.Text -> Bool
+rowShownIn out row =
+  let trimmed = T.strip row
+   in not (T.null trimmed) && trimmed `T.isInfixOf` out
+
+splitStatusFields :: T.Text -> Maybe [T.Text]
+splitStatusFields row
+  | null fields = Nothing
+  | otherwise = Just fields
+  where
+    fields = go (T.strip row)
+    go t
+      | T.null t = []
+      | otherwise =
+          let (field, rest) = breakGap t
+           in field : go (T.dropWhile (== ' ') rest)
+    breakGap t =
+      case T.breakOn gap t of
+        (field, rest)
+          | T.null rest -> (field, T.empty)
+          | otherwise -> (field, T.dropWhile (== ' ') rest)
+    gap = T.replicate 2 (T.singleton ' ')
+
+allSame :: (Eq a) => [a] -> Bool
+allSame [] = True
+allSame (x : xs) = all (== x) xs
+
+consoleWidth :: VM -> Int
+consoleWidth vm =
+  max 1 $
+    fromIntegral $
+      peekByte (vmMemory vm) 0x21
+
+padToBoundary :: Int -> Int -> T.Text
+padToBoundary col width
+  | rem' == 0 = T.empty
+  | otherwise = T.replicate (width - rem') (T.singleton ' ')
+  where
+    rem' = col `mod` width
+
+advanceColumn :: Int -> T.Text -> Int
+advanceColumn col t = foldl step col (T.unpack t)
+  where
+    step _ '\n' = 0
+    step n _ = n + 1
 
 -- | Write transcript text to its file, asking for the file name on
 -- first use.  An empty name, end of input, or a write failure turns

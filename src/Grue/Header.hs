@@ -41,6 +41,12 @@ data Header = Header
   -- this are dynamic memory, which the game may write to.
   , abbreviationsAddr :: !Int
   -- ^ Byte address of the abbreviations table.
+  , terminatingCharsAddr :: !Int
+  -- ^ Byte address of the terminating-characters table, or 0.
+  , alphabetTableAddr :: !Int
+  -- ^ Byte address of a story-specific alphabet table, or 0.
+  , headerExtTableAddr :: !Int
+  -- ^ Byte address of the header extension table, or 0.
   , fileLength :: !Int
   -- ^ Story file length in bytes, as declared in the header.
   , checksum :: !Word16
@@ -60,6 +66,9 @@ readHeader mem =
     , globalsAddr = word 0x0c
     , staticBase = word 0x0e
     , abbreviationsAddr = word 0x18
+    , terminatingCharsAddr = word 0x2e
+    , alphabetTableAddr = word 0x34
+    , headerExtTableAddr = word 0x36
     , fileLength = word 0x1a * lengthScale version
     , checksum = peekWord mem 0x1c
     }

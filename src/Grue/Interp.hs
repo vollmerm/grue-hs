@@ -5,11 +5,13 @@
 -- Execution is pure.  'run' advances the machine until it either needs
 -- a line of player input or halts, accumulating output text along the
 -- way; the frontend prints the text, gathers input, and resumes with
--- 'provideInput'.
+-- 'provideInput' or 'provideInputTerminated'.
 module Grue.Interp
   ( Stop (..)
   , run
+  , inputTerminators
   , provideInput
+  , provideInputTerminated
   , provideChar
   , finishSave
   , finishRestore
@@ -20,15 +22,15 @@ module Grue.Interp
   , statusLine
   ) where
 
-import Control.Monad (void)
+import Control.Monad (unless, void)
 import Control.Monad.State
-import Data.Bits (complement, testBit, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.Char (toLower)
 import Data.Int (Int16)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -75,9 +77,9 @@ run vm0 = case runState step vm0 of
 step :: Z (Maybe Stop)
 step = do
   vm <- get
-  let (inst, next) = decode (vmMemory vm) (vmHeader vm) (vmPC vm)
+  let (inst, storeAt, next) = decodeForExec (vmMemory vm) (vmHeader vm) (vmPC vm)
   put vm {vmPC = next}
-  exec inst
+  exec storeAt inst
 
 -- | The value of an operand.  Reading a variable operand may pop the
 -- evaluation stack, so operands are evaluated left to right.
@@ -114,32 +116,40 @@ returnValue w = do
     _ :| [] -> error "Grue.Interp: return from the top level"
     f :| (g : rest) -> do
       put vm {vmFrames = g :| rest, vmPC = frameReturnPC f}
-      modify (writeVar (frameStore f) w)
+      unless (frameDiscardResult f) $
+        modify (writeVar (frameStore f) w)
 
 -- | Call a routine.  Calling address 0 is legal and simply produces
 -- the result 0.
-callRoutine :: Word16 -> [Word16] -> Maybe Word8 -> Z ()
-callRoutine 0 _ st = storeTo st 0
-callRoutine packed args st = do
+callRoutine :: Word16 -> [Word16] -> Maybe Word8 -> Bool -> Z ()
+callRoutine 0 _ st False = storeTo st 0
+callRoutine 0 _ _ True = pure ()
+callRoutine packed args st discard = do
   vm <- get
   let mem = vmMemory vm
       hdr = vmHeader vm
       addr = packedToByte hdr packed
       count = fromIntegral (peekByte mem addr)
-      initials = [peekWord mem (addr + 1 + 2 * i) | i <- [0 .. count - 1]]
+      initials
+        | zVersion hdr >= 5 = replicate count 0
+        | otherwise = [peekWord mem (addr + 1 + 2 * i) | i <- [0 .. count - 1]]
       locals = zipWith fromMaybe initials (map Just args ++ repeat Nothing)
+      entry
+        | zVersion hdr >= 5 = addr + 1
+        | otherwise = addr + 1 + 2 * count
       frame =
         Frame
           { frameLocals = Seq.fromList locals
           , frameEval = []
           , frameReturnPC = vmPC vm
+          , frameDiscardResult = discard
           , frameStore = fromMaybe 0 st
           , frameArgs = length args
           }
   put
     vm
       { vmFrames = NE.cons frame (vmFrames vm)
-      , vmPC = addr + 1 + 2 * count
+      , vmPC = entry
       }
 
 -- | Interpret a machine word as signed.
@@ -163,14 +173,14 @@ output t = do
       | otherwise ->
           put (emit t (if transcriptOn vm then emitTranscript t vm else vm))
     (table, count) : rest -> do
-      let codes = mapMaybe charToZscii (T.unpack t)
+      let codes = mapMaybe (charToZsciiInStory (vmMemory vm) (vmHeader vm)) (T.unpack t)
           place i code = pokeByte (table + 2 + count + i) (fromIntegral code)
           mem = foldr (uncurry place) (vmMemory vm) (zip [0 ..] codes)
       put vm {vmMemory = mem, vmTables = (table, count + length codes) : rest}
 
 -- | Execute one decoded instruction.
-exec :: Instruction -> Z (Maybe Stop)
-exec (Instruction op operands st br text) = case op of
+exec :: Maybe Int -> Instruction -> Z (Maybe Stop)
+exec storeAt (Instruction op operands st br text) = case op of
   -- Comparisons and jumps
   Je -> branchy $ \vs -> case vs of
     (a : others) -> pure (a `elem` others)
@@ -178,6 +188,8 @@ exec (Instruction op operands st br text) = case op of
   Jl -> branch2 $ \a b -> pure (signed a < signed b)
   Jg -> branch2 $ \a b -> pure (signed a > signed b)
   Jz -> branch1 $ \a -> pure (a == 0)
+  CheckArgCount -> branch1 $ \n ->
+    gets (\vm -> fromIntegral n <= frameArgs (NE.head (vmFrames vm)))
   Jin -> branch2 $ \a b ->
     withWorld (\mem hdr -> Obj.parent mem hdr (obj a) == obj b)
   Test -> branch2 $ \bitmap flags -> pure (bitmap .&. flags == flags)
@@ -223,6 +235,12 @@ exec (Instruction op operands st br text) = case op of
     v <- val1
     modify (pushEval v)
   Pop -> continue (void (state popEval))
+  Catch -> continue $ do
+    vm <- get
+    storeTo st (fromIntegral (NE.length (vmFrames vm) - 1))
+  Throw -> continue $ do
+    (v, frameId) <- val2
+    throwToFrame v frameId
   Pull -> continue $ do
     ref <- val1
     v <- state popEval
@@ -303,7 +321,8 @@ exec (Instruction op operands st br text) = case op of
   NewLine -> continue $ output "\n"
   PrintChar -> continue $ do
     code <- val1
-    output (maybe T.empty T.singleton (zsciiToChar code))
+    vm <- get
+    output (maybe T.empty T.singleton (zsciiToCharInStory (vmMemory vm) (vmHeader vm) code))
   PrintNum -> continue $ do
     n <- val1
     output (T.pack (show (signed n)))
@@ -324,8 +343,12 @@ exec (Instruction op operands st br text) = case op of
   -- Control
   Call -> doCall
   Call1s -> doCall
+  Call1n -> doCallDiscard
   Call2s -> doCall
+  Call2n -> doCallDiscard
   CallVs2 -> doCall
+  CallVn -> doCallDiscard
+  CallVn2 -> doCallDiscard
   Ret -> continue $ do
     v <- val1
     returnValue v
@@ -348,6 +371,12 @@ exec (Instruction op operands st br text) = case op of
       EQ -> do
         modify (\vm -> vm {vmRng = advance (vmRng vm)})
         storeTo st 0
+  LogShift -> continue $ do
+    (n, places) <- val2
+    storeTo st (shiftLogical n (signed places))
+  ArtShift -> continue $ do
+    (n, places) <- val2
+    storeTo st (unsigned (shiftArithmetic (signed n) (signed places)))
   -- Input.  From version 4 read also accepts optional time and routine
   -- operands for timed input, which are ignored here.
   Sread -> do
@@ -355,7 +384,11 @@ exec (Instruction op operands st br text) = case op of
     case vals of
       (tbuf : pbuf : _) -> do
         modify $ \vm ->
-          vm {vmPending = Just (PendingRead (fromIntegral tbuf) (fromIntegral pbuf))}
+          vm
+            { vmPending =
+                Just
+                  (PendingRead (fromIntegral tbuf) (fromIntegral pbuf) st)
+            }
         pure (Just NeedInput)
       _ -> badOperands
   ReadChar -> do
@@ -366,19 +399,28 @@ exec (Instruction op operands st br text) = case op of
   Verify ->
     branch0 $
       gets (\vm -> checksumValid (vmMemory vm) (vmHeader vm))
+  Piracy -> branch0 (pure True)
   Quit -> pure (Just Halted)
   Restart -> continue $ modify restart
-  Save -> case br of
-    Nothing -> continue (pure ())
-    Just b -> do
-      vm <- get
-      put vm {vmPending = Just (PendingSave b)}
-      pure (Just (SaveRequested (saveState vm (branchAt b))))
-  Restore -> case br of
-    Nothing -> continue (pure ())
-    Just b -> do
-      modify (\vm -> vm {vmPending = Just (PendingRestore b)})
-      pure (Just RestoreRequested)
+  Save
+    | Just b <- br -> do
+        vm <- get
+        put vm {vmPending = Just (PendingSaveBranch b)}
+        pure (Just (SaveRequested (saveState vm (branchAt b))))
+    | Just var <- st
+    , Just resumePC <- storeAt -> do
+        vm <- get
+        put vm {vmPending = Just (PendingSaveStore resumePC var)}
+        pure (Just (SaveRequested (saveState vm resumePC)))
+    | otherwise -> continue (pure ())
+  Restore
+    | Just b <- br -> do
+        modify (\vm -> vm {vmPending = Just (PendingRestoreBranch b)})
+        pure (Just RestoreRequested)
+    | Just var <- st -> do
+        modify (\vm -> vm {vmPending = Just (PendingRestoreStore var)})
+        pure (Just RestoreRequested)
+    | otherwise -> continue (pure ())
   -- Display control
   ShowStatus -> continue (pure ())
   SplitWindow -> continue (val1 >>= modify . splitUpper . fromIntegral)
@@ -394,6 +436,48 @@ exec (Instruction op operands st br text) = case op of
           . pokeWord (fromIntegral arr + 2) (fromIntegral col)
       )
   SetTextStyle -> continue (val1 >>= modify . setTextStyle . fromIntegral)
+  SetColour -> continue (void (values operands))
+  Tokenise -> continue $ do
+    vals <- values operands
+    case vals of
+      [tbuf, pbuf] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) (0 :: Word16) (0 :: Word16)
+      [tbuf, pbuf, dict] -> tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) dict (0 :: Word16)
+      [tbuf, pbuf, dict, flag] ->
+        tokenizeBuffer (fromIntegral tbuf) (fromIntegral pbuf) dict flag
+      _ -> badOperands
+  EncodeText -> continue $ do
+    (src, len, from, dst) <- val4
+    vm <- get
+    let hdr = vmHeader vm
+        zscii =
+          [ fromIntegral (peekByte (vmMemory vm) (fromIntegral src + fromIntegral from + i))
+          | i <- [0 .. fromIntegral len - 1]
+          ]
+        words' = encodeText (vmMemory vm) hdr zscii
+        bytes = concatMap wordBytes words'
+        mem =
+          foldr
+            (\(i, b) -> pokeByte (fromIntegral dst + i) b)
+            (vmMemory vm)
+            (zip [0 ..] bytes)
+    put vm {vmMemory = mem}
+  CopyTable -> continue $ do
+    (first, second, size) <- val3
+    onMemory (copyTableBytes (fromIntegral first) (fromIntegral second) (signed size))
+  PrintTable -> continue $ do
+    vals <- values operands
+    case vals of
+      [table, width] ->
+        printTableFrom (fromIntegral table) (fromIntegral width) 1 0
+      [table, width, height] ->
+        printTableFrom (fromIntegral table) (fromIntegral width) (fromIntegral height) 0
+      [table, width, height, skip] ->
+        printTableFrom
+          (fromIntegral table)
+          (fromIntegral width)
+          (fromIntegral height)
+          (fromIntegral skip)
+      _ -> badOperands
   BufferMode -> continue (val1 >>= modify . setBufferMode . (/= 0))
   EraseWindow -> continue (val1 >>= modify . eraseWindow . signed)
   EraseLine -> continue (void val1 >> modify eraseLine)
@@ -426,12 +510,19 @@ exec (Instruction op operands st br text) = case op of
     doCall = continue $ do
       vals <- values operands
       case vals of
-        (routine : args) -> callRoutine routine args st
+        (routine : args) -> callRoutine routine args st False
+        [] -> error "Grue.Interp: call with no operands"
+
+    doCallDiscard = continue $ do
+      vals <- values operands
+      case vals of
+        (routine : args) -> callRoutine routine args Nothing True
         [] -> error "Grue.Interp: call with no operands"
 
     val1 = values operands >>= expect1
     val2 = values operands >>= expect2
     val3 = values operands >>= expect3
+    val4 = values operands >>= expect4
     expect1 vs = case vs of
       [a] -> pure a
       _ -> badOperands
@@ -440,6 +531,9 @@ exec (Instruction op operands st br text) = case op of
       _ -> badOperands
     expect3 vs = case vs of
       [a, b, c] -> pure (a, b, c)
+      _ -> badOperands
+    expect4 vs = case vs of
+      [a, b, c, d] -> pure (a, b, c, d)
       _ -> badOperands
     badOperands =
       error ("Grue.Interp: wrong operand count for " ++ show op)
@@ -484,23 +578,91 @@ exec (Instruction op operands st br text) = case op of
           v = unsigned (f (signed (peekVar n vm)))
        in (v, pokeVar n v vm)
 
+    throwToFrame result frameId = do
+      modify (unwindFrames (fromIntegral frameId))
+      returnValue result
+
+    unwindFrames target vm
+      | currentDepth == target = vm
+      | currentDepth < target = error ("Grue.Interp.throw: invalid stack frame " ++ show target)
+      | otherwise = unwindFrames target (vm {vmFrames = dropCurrent (vmFrames vm)})
+      where
+        currentDepth = NE.length (vmFrames vm) - 1
+        dropCurrent (_ :| []) = error "Grue.Interp.throw: cannot throw to the top level"
+        dropCurrent (_ :| (f : rest)) = f :| rest
+
     advance rng = snd (nextRandom 1 rng)
 
--- | Report whether the requested save was written.  The story sees
--- the outcome through the @save@ instruction's branch.
+    shiftLogical n places
+      | places >= 0 = unsigned (fromIntegral n `shiftL` places)
+      | otherwise = n `shiftR` negate places
+
+    shiftArithmetic n places
+      | places >= 0 = n `shiftL` places
+      | otherwise = n `div` (2 ^ negate places)
+
+    wordBytes w =
+      [fromIntegral (w `shiftR` 8), fromIntegral w]
+
+    copyTableBytes first second size mem
+      | second == 0 =
+          foldr (\addr -> pokeByte addr 0) mem [first .. first + abs size - 1]
+      | otherwise =
+          foldl
+            (\m (off, b) -> pokeByte (second + off) b m)
+            mem
+            writes
+      where
+        count = abs size
+        bytes = [peekByte mem (first + i) | i <- [0 .. count - 1]]
+        writes
+          | size >= 0 && second > first && second < first + count =
+              reverse (zip [0 .. count - 1] bytes)
+          | otherwise = zip [0 .. count - 1] bytes
+
+    printTableFrom table width height skip = do
+      vm <- get
+      let mem = vmMemory vm
+          rowText row =
+            T.pack $
+              mapMaybe
+                (zsciiToCharInStory mem (vmHeader vm) . fromIntegral . peekByte mem)
+                [table + row * (width + skip) + col | col <- [0 .. width - 1]]
+          rendered =
+            T.intercalate "\n" [rowText row | row <- [0 .. height - 1]]
+      output rendered
+
+    tokenizeBuffer tbuf pbuf dictAddr flag = do
+      vm <- get
+      let mem = vmMemory vm
+          hdr = vmHeader vm
+          dict =
+            if dictAddr == 0
+              then readDictionary mem hdr
+              else readDictionaryAt mem hdr (fromIntegral dictAddr)
+          line = readTextBuffer mem hdr tbuf
+      put vm {vmMemory = writeParseBuffer mem hdr dict pbuf flag line}
+
+-- | Report whether the requested save was written.  Versions 3 and 4
+-- see the outcome through the @save@ instruction's branch; version 5
+-- stores 0 or 1 in the instruction's result variable.
 finishSave :: Bool -> VM -> VM
 finishSave ok vm = case vmPending vm of
-  Just (PendingSave b) ->
+  Just (PendingSaveBranch b) ->
     execState (branchOn (Just b) ok) vm {vmPending = Nothing}
+  Just (PendingSaveStore _ var) ->
+    writeVar var (if ok then 1 else 0) vm {vmPending = Nothing}
   _ -> error "Grue.Interp.finishSave: no save is pending"
 
 -- | Complete a requested restore with the bytes of a save file (or
 -- 'Nothing' if none could be read).  On success the machine resumes
--- from the moment of the original save, with its branch taken as
--- true; on any failure the @restore@ instruction's branch reports it.
+-- from the moment of the original save, taking that saved @save@
+-- instruction's success path (or storing 2 for version 5).  On
+-- failure, the pending @restore@ reports 0 or false according to the
+-- story version.
 finishRestore :: Maybe ByteString -> VM -> VM
 finishRestore mbytes vm = case vmPending vm of
-  Just (PendingRestore b) ->
+  Just (PendingRestoreBranch b) ->
     case attempt =<< mbytes of
       Just restored -> restored
       Nothing -> execState (branchOn (Just b) False) failed
@@ -528,7 +690,45 @@ finishRestore mbytes vm = case vmPending vm of
               , vmBeeps = vmBeeps vm
               , vmRng = vmRng vm
               }
+  Just (PendingRestoreStore var) ->
+    case attempt =<< mbytes of
+      Just restored -> restored
+      Nothing -> writeVar var 0 failed
+    where
+      failed = vm {vmPending = Nothing}
+      attempt bytes = case restoreState story bytes of
+        Left _ -> Nothing
+        Right fresh -> Just (resume fresh)
+      story = originalBytes (vmMemory vm)
+      resume fresh = resumeAfterSave vm fresh
   _ -> error "Grue.Interp.finishRestore: no restore is pending"
+
+-- | Resume a restored machine from the point of the original @save@.
+resumeAfterSave :: VM -> VM -> VM
+resumeAfterSave running fresh = case zVersion (vmHeader fresh) of
+  v
+    | v <= 4 -> execState (branchOn (Just b) True) prepared
+    | otherwise -> writeVar var 2 prepared {vmPC = pc + 1}
+  where
+    pc = vmPC fresh
+    mem = vmMemory fresh
+    (b, after) = decodeBranch mem pc
+    var = peekByte mem pc
+    -- The transcript and fixed-pitch bits of Flags 2 survive a restore,
+    -- as the standard requires; output and randomness carry over from the
+    -- running machine.
+    flags2 =
+      peekWord mem 0x10 .&. complement 0x3
+        .|. (peekWord (vmMemory running) 0x10 .&. 0x3)
+    prepared =
+      fresh
+        { vmPC = after
+        , vmMemory = pokeWord 0x10 flags2 mem
+        , vmOutput = vmOutput running
+        , vmTranscript = vmTranscript running
+        , vmBeeps = vmBeeps running
+        , vmRng = vmRng running
+        }
 
 -- | Finish the innermost memory output stream: record the character
 -- count in the table's first word, as @output_stream -3@ requires.
@@ -557,45 +757,123 @@ restart vm =
   where
     fresh = boot (originalBytes (vmMemory vm))
 
+-- | The ZSCII codes that currently terminate a pending @read@.  Enter
+-- (13) always ends the line; version 5 stories may add more codes
+-- through the header's terminating-characters table.
+inputTerminators :: VM -> [Word16]
+inputTerminators vm = case vmPending vm of
+  Just PendingRead {} -> 13 : filter (/= 13) (terminatorTable (vmMemory vm) (vmHeader vm))
+  _ -> [13]
+
 -- | Complete a pending @read@: store the typed line in the text
 -- buffer, tokenize it against the standard dictionary, and fill the
 -- parse buffer.  The machine is left ready to 'run' again.  A running
 -- transcript receives the input line, as the standard requires.
 provideInput :: Text -> VM -> VM
-provideInput input vm = case vmPending vm of
-  Just (PendingRead tbuf pbuf) ->
-    echoed {vmMemory = written, vmPending = Nothing}
+provideInput = provideInputTerminated 13
+
+-- | Complete a pending @read@ with an explicit terminating character.
+-- Version 5 @aread@ stores that ZSCII code in its result variable.
+provideInputTerminated :: Word16 -> Text -> VM -> VM
+provideInputTerminated terminator input vm = case vmPending vm of
+  Just (PendingRead tbuf pbuf st) ->
+    withResult {vmPending = Nothing}
     where
-      echoed
-        | transcriptOn vm = emitTranscript (input <> "\n") vm
-        | otherwise = vm
-      mem = vmMemory vm
       hdr = vmHeader vm
-      maxLetters = fromIntegral (peekByte mem tbuf)
-      line = T.map toLower (T.take maxLetters input)
-      codes = mapMaybe charToZscii (T.unpack line)
-      textWrites m =
-        foldr
-          (\(i, c) -> pokeByte (tbuf + 1 + i) (fromIntegral c))
-          m
-          (zip [0 ..] codes)
-      terminated = pokeByte (tbuf + 1 + length codes) 0 . textWrites
-      dict = readDictionary mem hdr
-      tokens = take (fromIntegral (peekByte mem pbuf)) (tokenize dict line)
-      entry i (pos, word) m =
-        ( pokeWord base (fromIntegral dictAddr)
-            . pokeByte (base + 2) (fromIntegral (T.length word))
-            . pokeByte (base + 3) (fromIntegral (pos + 1))
-        )
-          m
-        where
-          base = pbuf + 2 + 4 * i
-          dictAddr = fromMaybe 0 (lookupWord mem hdr dict word)
-      parseWrites m =
-        foldr (uncurry entry) m (zip [0 ..] tokens)
-      counted = pokeByte (pbuf + 1) (fromIntegral (length tokens)) . parseWrites
-      written = counted (terminated mem)
+      typedTerminator
+        | terminator == 13 = T.empty
+        | otherwise =
+            maybe T.empty T.singleton (zsciiToCharInStory (vmMemory vm) hdr terminator)
+      echoed
+        | transcriptOn vm = emitTranscript (input <> typedTerminator <> "\n") vm
+        | otherwise = vm
+      mem = vmMemory echoed
+      line = enteredLine hdr mem tbuf input
+      withText = writeTextBuffer mem hdr tbuf line
+      written
+        | zVersion hdr >= 5 && pbuf == 0 = withText
+        | otherwise = writeParseBuffer withText hdr (readDictionary withText hdr) pbuf 0 line
+      withMemory = echoed {vmMemory = written}
+      withResult = maybe withMemory (\var -> writeVar var terminator withMemory) st
   _ -> error "Grue.Interp.provideInput: no read is pending"
+
+enteredLine :: Header -> Memory -> Int -> Text -> Text
+enteredLine hdr mem tbuf input
+  | zVersion hdr >= 5 = existing <> typed
+  | otherwise = typed
+  where
+    maxLetters = fromIntegral (peekByte mem tbuf)
+    existingCount
+      | zVersion hdr >= 5 = min maxLetters (fromIntegral (peekByte mem (tbuf + 1)))
+      | otherwise = 0
+    existing =
+      T.pack $
+        mapMaybe
+          (zsciiToCharInStory mem hdr . fromIntegral . peekByte mem)
+          [tbuf + 2 + i | i <- [0 .. existingCount - 1]]
+    typed = T.map toLower (T.take (maxLetters - existingCount) input)
+
+writeTextBuffer :: Memory -> Header -> Int -> Text -> Memory
+writeTextBuffer mem hdr tbuf line
+  | zVersion hdr >= 5 =
+      foldr
+        (\(i, c) -> pokeByte (tbuf + 2 + i) (fromIntegral c))
+        (pokeByte (tbuf + 1) (fromIntegral (length codes)) mem)
+        (zip [0 ..] codes)
+  | otherwise =
+      pokeByte (tbuf + 1 + length codes) 0 textWrites
+  where
+    codes = mapMaybe (charToZsciiInStory mem hdr) (T.unpack line)
+    textWrites =
+      foldr
+        (\(i, c) -> pokeByte (tbuf + 1 + i) (fromIntegral c))
+        mem
+        (zip [0 ..] codes)
+
+readTextBuffer :: Memory -> Header -> Int -> Text
+readTextBuffer mem hdr tbuf
+  | zVersion hdr >= 5 =
+      T.pack $
+        mapMaybe
+          (zsciiToCharInStory mem hdr . fromIntegral . peekByte mem)
+          [tbuf + 2 + i | i <- [0 .. count - 1]]
+  | otherwise =
+      T.pack (go (tbuf + 1))
+  where
+    count = fromIntegral (peekByte mem (tbuf + 1))
+    go addr
+      | peekByte mem addr == 0 = []
+      | otherwise =
+          maybe id (:) (zsciiToCharInStory mem hdr (fromIntegral (peekByte mem addr))) (go (addr + 1))
+
+writeParseBuffer :: Memory -> Header -> Dictionary -> Int -> Word16 -> Text -> Memory
+writeParseBuffer mem hdr dict pbuf flag line = counted
+  where
+    tokens = take (fromIntegral (peekByte mem pbuf)) (tokenize dict line)
+    offsetBase = if zVersion hdr >= 5 then 2 else 1
+    entry i (pos, word) m
+      | flag /= 0 && isNothing found = m
+      | otherwise =
+          pokeByte (base + 3) (fromIntegral (pos + offsetBase))
+            . pokeByte (base + 2) (fromIntegral (T.length word))
+            . pokeWord base (fromIntegral (fromMaybe 0 found))
+            $ m
+      where
+        base = pbuf + 2 + 4 * i
+        found = lookupWord mem hdr dict word
+    counted =
+      pokeByte (pbuf + 1) (fromIntegral (length tokens)) $
+        foldr (uncurry entry) mem (zip [0 ..] tokens)
+
+terminatorTable :: Memory -> Header -> [Word16]
+terminatorTable mem hdr
+  | zVersion hdr < 5 = []
+  | terminatingCharsAddr hdr == 0 = []
+  | otherwise = go (terminatingCharsAddr hdr)
+  where
+    go addr = case peekByte mem addr of
+      0 -> []
+      code -> fromIntegral code : go (addr + 1)
 
 -- | Complete a pending @read_char@ by storing the ZSCII code of the
 -- keypress in the instruction's store variable.

@@ -1,8 +1,8 @@
 # grue-hs
 
-A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). This interpreter targets versions 3 and 4 of the format, which cover much of the Infocom catalog.
+A Z-machine interpreter written in Haskell. The [Z-machine](https://ifarchive.org/indexes/if-archive/infocom/interpreters/specification/) is the virtual machine that ran Infocom's text adventures, such as [Zork](https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro), [A Mind Forever Voyaging](https://ifdb.org/viewgame?id=4h62dvooeg9ajtfa), and [Wishbringer](https://ifdb.org/viewgame?id=z02joykzh66wfhcl). The interpreter fully supports versions 3 and 4 and now runs much of version 5 as well.
 
-The opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work. Support for Z-machine versions beyond 4 is planned but not implemented.
+The opcode set, object table, dictionary, and save/restore (via the [Quetzal format](https://www.inform-fiction.org/zmachine/standards/quetzal/)) all work. Version 5 support includes the core call/save/restore semantics, text and dictionary tables, custom alphabet and Unicode translation tables, and enough control-flow support to run the version-5 build of the CZECH conformance suite. Some presentation-oriented version 5 features are still being filled in.
 
 ## Building
 
@@ -24,7 +24,7 @@ The `grue-hs` executable opens a full-screen curses interface when run from a te
 
 Correctness is checked two ways.
 
-The `cabal test` suite runs a set of unit tests along with the CZECH conformance suite (compiled for both v3 and v4) and a full save/restore roundtrip against the bundled `cloak.z3`:
+The `cabal test` suite runs a set of unit tests along with the CZECH conformance suite (bundled for v3 and v4, plus v5 when `GRUE_STORY_DIR` or the sibling `../zifmia` checkout provides `testers/czech/czech.z5`) and a full save/restore roundtrip against the bundled `cloak.z3`:
 
 ```
 cabal test

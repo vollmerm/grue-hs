@@ -7,6 +7,7 @@ import Data.Bits (testBit)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.List (sort)
+import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
@@ -30,10 +31,11 @@ main :: IO ()
 main = do
   stories <- loadStories
   precise <- loadPrecise
-  defaultMain (tests stories precise)
+  czechV5 <- loadCzechV5
+  defaultMain (tests stories precise czechV5)
 
-tests :: [Story] -> [Precise] -> TestTree
-tests stories precise =
+tests :: [Story] -> [Precise] -> Maybe FilePath -> TestTree
+tests stories precise czechV5 =
   testGroup
     "grue-hs"
     [ memoryTests
@@ -43,7 +45,7 @@ tests stories precise =
     , objectTests
     , instructionTests
     , interpTests
-    , conformanceTests
+    , conformanceTests czechV5
     , preciseTests precise
     , storyTests stories
     ]
@@ -155,6 +157,13 @@ loadStories = do
           else pure []
   concat <$> mapM load storySpecs
 
+loadCzechV5 :: IO (Maybe FilePath)
+loadCzechV5 = do
+  root <- storyRoot
+  let path = root </> "testers/czech/czech.z5"
+  exists <- doesFileExist path
+  pure (if exists then Just path else Nothing)
+
 -- | A little memory image with recognizable contents: byte @i@ holds
 -- value @i@ for the first 256 bytes.
 countingMemory :: Memory
@@ -224,6 +233,9 @@ syntheticStory =
     , (0x0c, 0x0102) -- globals
     , (0x0e, 0x0442) -- static memory base
     , (0x18, 0x0040) -- abbreviations
+    , (0x2e, 0x0456) -- terminating characters
+    , (0x34, 0x0789) -- alphabet table
+    , (0x36, 0x09ab) -- header extension table
     , (0x1a, 40) -- file length, stored divided by 2 in version 3
     , (0x1c, 0xbeef) -- checksum
     ]
@@ -232,6 +244,16 @@ syntheticStory =
 -- | Split a 16-bit word into big-endian bytes.
 wordBytes :: Word16 -> [Word8]
 wordBytes w = [fromIntegral (w `div` 256), fromIntegral (w `mod` 256)]
+
+placeBytes :: Int -> [Word8] -> Memory -> Memory
+placeBytes addr bytes mem =
+  foldr (\(i, b) -> pokeByte i b) mem (zip [addr ..] bytes)
+
+zsciiBytes :: String -> [Word8]
+zsciiBytes = map encode
+  where
+    encode '\n' = 13
+    encode c = fromIntegral (fromEnum c)
 
 headerTests :: TestTree
 headerTests =
@@ -247,6 +269,9 @@ headerTests =
         globalsAddr hdr @?= 0x0102
         staticBase hdr @?= 0x0442
         abbreviationsAddr hdr @?= 0x0040
+        terminatingCharsAddr hdr @?= 0x0456
+        alphabetTableAddr hdr @?= 0x0789
+        headerExtTableAddr hdr @?= 0x09ab
         fileLength hdr @?= 80
         checksum hdr @?= 0xbeef
     , testCase "packed addresses double in version 3" $ do
@@ -307,6 +332,32 @@ zstringTests =
         zsciiToChar 161 @?= Just 'ß'
         zsciiToChar 223 @?= Just '¿'
         zsciiToChar 224 @?= Nothing
+    , testCase "version 5 custom alphabet tables round-trip story text" $ do
+        let base =
+              mkStoryVersion 5 [(0x34, 0x80)] (replicate 256 0)
+            alphabetTable =
+              concatMap
+                zsciiBytes
+                [ "@bcdefghijklmnopqrstuvwxyz"
+                , "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                , " \n0123456789.,!?_#'\"/\\-:()"
+                ]
+            mem0 = placeBytes 0x80 alphabetTable base
+            hdr = readHeader mem0
+            encoded = encodeWordInStory mem0 hdr "@"
+            mem = placeBytes 0x100 (concatMap wordBytes encoded) mem0
+        decodeStringAt mem hdr 0x100 @?= "@"
+    , testCase "version 5 custom Unicode tables map extra ZSCII codes" $ do
+        let mem =
+              foldr
+                (uncurry placeBytes)
+                (mkStoryVersion 5 [(0x36, 0x90)] (replicate 256 0))
+                [ (0x90, wordBytes 3 ++ wordBytes 0 ++ wordBytes 0 ++ wordBytes 0xa0)
+                , (0xa0, 1 : wordBytes 0x03a9)
+                ]
+            hdr = readHeader mem
+        zsciiToCharInStory mem hdr 155 @?= Just '\x03A9'
+        charToZsciiInStory mem hdr '\x03A9' @?= Just 155
     , testCase "encodeWord matches the standard's worked example" $ do
         let v4Header = (readHeader syntheticStory) {zVersion = 4}
         encodeWord v4Header "i" @?= [0x38a5, 0x14a5, 0x94a5]
@@ -369,6 +420,23 @@ dictionaryTests =
     , testCase "tokenize of empty input is empty" $ do
         let dict = readDictionary dictStory (readHeader dictStory)
         tokenize dict "   " @?= []
+    , testCase "version 5 dictionary separators use the story Unicode table" $ do
+        let dict =
+              [1, 155, 9, 0, 1]
+                ++ concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) "go")
+                ++ [0, 0, 0]
+            mem =
+              foldr
+                (uncurry placeBytes)
+                (mkStoryVersion 5 [(0x08, 64), (0x36, 0x90)] (replicate 256 0))
+                [ (64, dict)
+                , (0x90, wordBytes 3 ++ wordBytes 0 ++ wordBytes 0 ++ wordBytes 0xa0)
+                , (0xa0, 1 : wordBytes 0x03a9)
+                ]
+            hdr = readHeader mem
+            input = T.pack ['g', 'o', '\x03A9', 'e', 'a', 's', 't']
+        tokenize (readDictionary mem hdr) input
+          @?= [(0, "go"), (2, "\x03A9"), (3, "east")]
     ]
 
 -- | A story with a three-object tree at address 64: object 1 ("box")
@@ -668,6 +736,106 @@ instructionV4Cases =
                 Nothing
             , 71
             )
+  , testGroup "version 5 opcodes" instructionV5Cases
+  ]
+
+instructionV5Cases :: [TestTree]
+instructionV5Cases =
+  [ testCase "call_1n discards its result" $
+      decodeAtVersion 5 [0x9f, 0x12]
+        @?= (Instruction Call1n [SmallConst 0x12] Nothing Nothing Nothing, 66)
+  , testCase "call_2n discards its result" $
+      decodeAtVersion 5 [0x1a, 0x0a, 0x0b]
+        @?= ( Instruction
+                Call2n
+                [SmallConst 0x0a, SmallConst 0x0b]
+                Nothing
+                Nothing
+                Nothing
+            , 67
+            )
+  , testCase "version 5 not uses the variable form" $
+      decodeAtVersion 5 [0xf8, 0x7f, 0x12, 0x03]
+        @?= (Instruction Not [SmallConst 0x12] (Just 3) Nothing Nothing, 68)
+  , testCase "call_vn discards its result" $
+      decodeAtVersion 5 [0xf9, 0x5f, 1, 2]
+        @?= ( Instruction
+                CallVn
+                [SmallConst 1, SmallConst 2]
+                Nothing
+                Nothing
+                Nothing
+            , 68
+            )
+  , testCase "call_vn2 reads two type bytes and discards its result" $
+      decodeAtVersion 5 [0xfa, 0x55, 0x7f, 1, 2, 3, 4, 5]
+        @?= ( Instruction
+                CallVn2
+                (map SmallConst [1, 2, 3, 4, 5])
+                Nothing
+                Nothing
+                Nothing
+            , 72
+            )
+  , testCase "extended form decodes art_shift" $
+      decodeAtVersion 5 [0xbe, 0x03, 0x5f, 0x10, 0x02, 0x07]
+        @?= ( Instruction
+                ArtShift
+                [SmallConst 0x10, SmallConst 0x02]
+                (Just 7)
+                Nothing
+                Nothing
+            , 70
+            )
+  , testCase "version 5 aread stores its terminator result" $
+      decodeAtVersion 5 [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10]
+        @?= ( Instruction
+                Sread
+                [LargeConst 0x0180, LargeConst 0x01c0]
+                (Just 0x10)
+                Nothing
+                Nothing
+            , 71
+            )
+  , testCase "tokenise decodes four operands" $
+      decodeAtVersion 5 [0xfb, 0x05, 0x01, 0x80, 0x01, 0xc0, 0x00, 0x01]
+        @?= ( Instruction
+                Tokenise
+                [LargeConst 0x0180, LargeConst 0x01c0, SmallConst 0x00, SmallConst 0x01]
+                Nothing
+                Nothing
+                Nothing
+            , 72
+            )
+  , testCase "version 5 save stores instead of branching" $
+      decodeAtVersion 5 [0xb5, 0x10]
+        @?= (Instruction Save [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 restore stores instead of branching" $
+      decodeAtVersion 5 [0xb6, 0x10]
+        @?= (Instruction Restore [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 catch stores the current stack frame" $
+      decodeAtVersion 5 [0xb9, 0x10]
+        @?= (Instruction Catch [] (Just 0x10) Nothing Nothing, 66)
+  , testCase "version 5 throw decodes as a 2OP instruction" $
+      decodeAtVersion 5 [0x3c, 42, 0x10]
+        @?= ( Instruction
+                Throw
+                [SmallConst 42, ByVariable 16]
+                Nothing
+                Nothing
+                Nothing
+            , 67
+            )
+  , testCase "version 5 piracy branches like a 0OP test" $
+      decodeAtVersion 5 [0xbf, 0xc4]
+        @?= ( Instruction
+                Piracy
+                []
+                Nothing
+                (Just (Branch True 65 (BranchAddr 68)))
+                Nothing
+            , 66
+            )
   ]
 
 -- | Boot a story assembled from segments of bytes at absolute
@@ -683,6 +851,14 @@ bootProgVersion version = boot . progImage version
 -- | Like 'bootProg', but with an explicit random seed.
 bootProgSeeded :: Word64 -> [(Int, [Word8])] -> VM
 bootProgSeeded seed = bootWithSeed seed . progImage 3
+
+runProgVersion :: Word8 -> [Word8] -> (T.Text, Stop)
+runProgVersion version code = (out, stop)
+  where
+    (out, stop, _) = runProgVMVersion version code
+
+runProgVMVersion :: Word8 -> [Word8] -> (T.Text, Stop, VM)
+runProgVMVersion version code = run (bootProgVersion version [(64, code)])
 
 -- | The flattened story image for a set of code segments.
 progImage :: Word8 -> [(Int, [Word8])] -> BS.ByteString
@@ -708,12 +884,15 @@ runProgVM code = run (bootProg [(64, code)])
 -- | A small dictionary for programs that read input: separators
 -- @. , \"@, entry length 7, and four sorted words.
 dictBytes :: [Word8]
-dictBytes =
-  [3, 46, 44, 34, 7, 0, 4]
+dictBytes = dictBytesVersion 3
+
+dictBytesVersion :: Word8 -> [Word8]
+dictBytesVersion version =
+  [3, 46, 44, 34, fromIntegral (2 * length (encodeWord hdr "go") + 3), 0, 4]
     ++ concatMap entry ["go", "look", "nearby", "sword"]
   where
-    v3hdr = readHeader (mkStory [] [])
-    entry w = concatMap wordBytes (encodeWord v3hdr w) ++ [0, 0, 0]
+    hdr = readHeader (mkStoryVersion version [] [])
+    entry w = concatMap wordBytes (encodeWord hdr w) ++ [0, 0, 0]
 
 interpTests :: TestTree
 interpTests =
@@ -732,6 +911,30 @@ interpTests =
             routine = [0x01, 0x00, 0x05, 0xab, 0x01]
             (out, stop, _) = run (bootProg [(64, main'), (74, routine)])
         (out, stop) @?= ("9", Halted)
+    , testCase "version 5 routines zero-initialize locals" $ do
+        let main' = [0xe0, 0x3f, 0x00, 0x40, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            routine = [0x01, 0xab, 0x01]
+            (out, stop, _) = run (bootProgVersion 5 [(64, main'), (0x100, routine)])
+        (out, stop) @?= ("0", Halted)
+    , testCase "call_1n leaves no discarded result on the stack" $ do
+        let main' = [0x9f, 0x25, 0xba]
+            routine = [0x00, 0xe6, 0x7f, 7, 0x9b, 1]
+            (_, stop, vm) = run (bootProgVersion 5 [(64, main'), (148, routine)])
+        stop @?= Halted
+        frameEval (NE.head (vmFrames vm)) @?= []
+    , testCase "version 5 throw unwinds to the caught routine" $ do
+        let main' = [0xe0, 0x3f, 0x00, 0x40, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            catcher = [0x00, 0xb9, 0x10, 0x9f, 0x50, 0x9b, 0x00]
+            thrower = [0x00, 0x3c, 42, 0x10]
+            (out, stop, _) =
+              run (bootProgVersion 5 [(64, main'), (0x100, catcher), (0x140, thrower)])
+        (out, stop) @?= ("42", Halted)
+    , testCase "call_vn2 leaves no discarded result on the stack" $ do
+        let main' = [0xfa, 0x1f, 0xff, 0x00, 0x25, 7, 0xba]
+            routine = [0x00, 0xe6, 0x7f, 9, 0x9b, 1]
+            (_, stop, vm) = run (bootProgVersion 5 [(64, main'), (148, routine)])
+        stop @?= Halted
+        frameEval (NE.head (vmFrames vm)) @?= []
     , testCase "a taken branch skips ahead" $
         runProg [0x03, 5, 3, 0xc5, 0xe6, 0x7f, 1, 0xe6, 0x7f, 2, 0xba]
           @?= ("2", Halted)
@@ -764,6 +967,37 @@ interpTests =
         stop @?= Halted
         assertBool ("out of range: " ++ T.unpack out) $
           out `elem` ["1", "2", "3"]
+    , testCase "log_shift shifts right logically" $
+        runProgVersion 5 [0xbe, 0x02, 0x0f, 0xff, 0xff, 0xff, 0xfc, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+          @?= ("4095", Halted)
+    , testCase "art_shift preserves the sign bit" $
+        runProgVersion 5 [0xbe, 0x03, 0x0f, 0xff, 0xff, 0xff, 0xfc, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+          @?= ("-1", Halted)
+    , testCase "version 5 save stores 0 or 1 at the save site" $ do
+        let prog = [0xb5, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            saveRequest = case run (bootProgVersion 5 [(64, prog)]) of
+              (_, SaveRequested _, pending) -> pending
+              (_, other, _) -> error ("expected save request, got " ++ show other)
+            (outFail, stopFail, _) = run (finishSave False saveRequest)
+            (outOk, stopOk, _) = run (finishSave True saveRequest)
+        (outFail, stopFail) @?= ("0", Halted)
+        (outOk, stopOk) @?= ("1", Halted)
+    , testCase "version 5 restore resumes a save with result 2" $ do
+        let prog = [0xb6, 0x11, 0xb5, 0x10, 0xe6, 0xbf, 0x10, 0xba]
+            vm0 = bootProgVersion 5 [(64, prog)]
+            pendingRestore = case run vm0 of
+              (_, RestoreRequested, pending) -> pending
+              (_, other, _) -> error ("expected restore request, got " ++ show other)
+            (saveBytes, pendingSave) = case run (finishRestore Nothing pendingRestore) of
+              (_, SaveRequested bytes, pending) -> (bytes, pending)
+              (_, other, _) -> error ("expected save request, got " ++ show other)
+            (_, _, afterSave) = run (finishSave True pendingSave)
+            pendingRestore2 = case run vm0 of
+              (_, RestoreRequested, pending) -> pending
+              (_, other, _) -> error ("expected restore request, got " ++ show other)
+            (out, stop, _) = run (finishRestore (Just saveBytes) pendingRestore2)
+        frameEval (NE.head (vmFrames afterSave)) @?= []
+        (out, stop) @?= ("2", Halted)
     , testCase "output stream 3 redirects into memory" $ do
         -- Select a table at 0x180, print "hi" (redirected), deselect,
         -- then print "hi" again to the screen.
@@ -909,6 +1143,104 @@ interpTests =
         peekWord mem 0x1c6 @?= 0
         peekByte mem 0x1c8 @?= 4
         peekByte mem 0x1c9 @?= 5
+    , testCase "version 5 aread stores length, positions, and the terminator" $ do
+        let prog = [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [(64, prog), (0x100, dictBytesVersion 5), (0x180, [20, 0]), (0x1c0, [5, 0])]
+            (out1, stop1, vm1) = run vm0
+        (out1, stop1) @?= ("", NeedInput)
+        let vm2 = provideInput "go  EAST" vm1
+            (_, stop2, vm3) = run vm2
+            mem = vmMemory vm3
+        stop2 @?= Halted
+        peekVar 16 vm3 @?= 13
+        peekByte mem 0x181 @?= 8
+        [peekByte mem (0x182 + i) | i <- [0 .. 7]]
+          @?= map (fromIntegral . fromEnum) "go  east"
+        peekByte mem 0x1c1 @?= 2
+        peekWord mem 0x1c2 @?= 0x0107
+        peekByte mem 0x1c4 @?= 2
+        peekByte mem 0x1c5 @?= 2
+        peekWord mem 0x1c6 @?= 0
+        peekByte mem 0x1c8 @?= 4
+        peekByte mem 0x1c9 @?= 6
+    , testCase "version 5 aread honors terminating-character tables" $ do
+        let prog =
+              concat
+                [ [0xf3, 0x7f, 0x02]
+                , [0xe4, 0x0f, 0x01, 0x80, 0x01, 0xc0, 0x10]
+                , [0xba]
+                ]
+            vm0 =
+              bootProgVersion
+                5
+                [ (0x2e, wordBytes 0x140)
+                , (64, prog)
+                , (0x100, dictBytesVersion 5)
+                , (0x140, [46, 0])
+                , (0x180, [20, 0])
+                , (0x1c0, [5, 0])
+                ]
+            (_, stop1, vm1) = run vm0
+            vm2 = provideInputTerminated 46 "go east" vm1
+            (_, stop2, vm3) = run vm2
+            mem = vmMemory vm3
+        stop1 @?= NeedInput
+        inputTerminators vm1 @?= [13, 46]
+        stop2 @?= Halted
+        peekVar 16 vm3 @?= 46
+        peekByte mem 0x181 @?= 7
+        [peekByte mem (0x182 + i) | i <- [0 .. 6]]
+          @?= map (fromIntegral . fromEnum) "go east"
+        fst (takeTranscript vm3) @?= "go east.\n"
+    , testCase "tokenise honors unsorted user dictionaries and preserve flag" $ do
+        let userDict = [0, 9, 0xff, 0xfe] ++ concatMap entry ["sword", "go"]
+            entry w =
+              concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) w) ++ [0, 0, 0]
+            prog = [0xfb, 0x01, 0x01, 0x80, 0x01, 0xc0, 0x01, 0x40, 0x01, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [ (64, prog)
+                , (0x100, dictBytesVersion 5)
+                , (0x140, userDict)
+                , (0x180, 20 : 8 : map (fromIntegral . fromEnum) "go  east")
+                , (0x1c0, [5, 0, 0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44])
+                ]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        peekByte mem 0x1c1 @?= 2
+        peekWord mem 0x1c2 @?= 0x014d
+        peekByte mem 0x1c4 @?= 2
+        peekByte mem 0x1c5 @?= 2
+        [peekByte mem (0x1c6 + i) | i <- [0 .. 3]] @?= [0x11, 0x22, 0x33, 0x44]
+    , testCase "encode_text writes dictionary-form bytes" $ do
+        let encoded = concatMap wordBytes (encodeWord (readHeader (mkStoryVersion 5 [] [])) "sword")
+            prog = [0xfc, 0x14, 0x01, 0x80, 5, 0, 0x01, 0xa0, 0xba]
+            vm0 =
+              bootProgVersion
+                5
+                [ (64, prog)
+                , (0x180, map (fromIntegral . fromEnum) "sword")
+                ]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        [peekByte mem (0x1a0 + i) | i <- [0 .. 5]] @?= encoded
+    , testCase "copy_table preserves overlapping source bytes" $ do
+        let prog = [0xfd, 0x07, 0x01, 0x80, 0x01, 0x82, 4, 0xba]
+            vm0 = bootProgVersion 5 [(64, prog), (0x180, [1, 2, 3, 4])]
+            (_, stop, vm) = run vm0
+            mem = vmMemory vm
+        stop @?= Halted
+        [peekByte mem (0x180 + i) | i <- [0 .. 5]] @?= [1, 2, 1, 2, 3, 4]
+    , testCase "print_table prints a text rectangle" $
+        let prog = [0xfe, 0x15, 0x01, 0x80, 3, 2, 0, 0xba]
+            (out, stop, _) = run (bootProgVersion 5 [(64, prog), (0x180, map (fromIntegral . fromEnum) "abcd12")])
+         in (out, stop) @?= ("abc\nd12", Halted)
     , testCase "scan_table finds a matching word and stores its address" $ do
         let table = concatMap wordBytes [10, 20, 30]
             -- scan_table 20 0x140 3 -> G0 ?(next); quit
@@ -956,17 +1288,20 @@ interpTests =
         drawnWith 1 @?= drawnWith 2
     ]
 
--- | The czech conformance suite, compiled to versions 3 and 4 and
--- bundled with the repository, must run to completion with no failures.
--- czech needs no input: it prints its results and quits.
-conformanceTests :: TestTree
-conformanceTests =
+-- | The bundled czech conformance suite covers versions 3 and 4; when a
+-- version 5 build is present in the external story collection, it is
+-- checked too. czech needs no input: it prints its results and quits.
+conformanceTests :: Maybe FilePath -> TestTree
+conformanceTests czechV5 =
   testGroup
     "czech conformance"
-    [ czechCase "test/stories/czech.z3" 3 349
-    , czechCase "test/stories/czech.z4" 4 367
-    ]
+    ( [ czechCase "test/stories/czech.z3" 3 349
+      , czechCase "test/stories/czech.z4" 4 367
+      ]
+        ++ maybe [] (\path -> [czechCase path 5 406]) czechV5
+    )
   where
+    czechCase :: FilePath -> Int -> Int -> TestTree
     czechCase path version passed = testCase path $ do
       bytes <- BS.readFile path
       zVersion (readHeader (fromStory bytes)) @?= version
@@ -1011,11 +1346,11 @@ loadPrecise = mapM load . sort . filter isStory =<< listDirectory preciseDir
 
 -- | Drive a booted machine over a scripted input stream exactly as the
 -- console frontend does, and return the text it prints.  Input is not
--- echoed; each 'NeedInput' consumes one line and each 'NeedChar' one
--- character, and running out of input ends the run as end-of-file
--- would.  Save and restore requests are answered as a successful save
--- and a declined restore, enough to step through those paths without a
--- file system.
+-- echoed; each 'NeedInput' consumes text through the next line break or
+-- terminating character, and each 'NeedChar' one character.  Running
+-- out of input ends the run as end-of-file would.  Save and restore
+-- requests are answered as a successful save and a declined restore,
+-- enough to step through those paths without a file system.
 playScript :: VM -> T.Text -> T.Text
 playScript = go True T.empty
   where
@@ -1030,15 +1365,25 @@ playScript = go True T.empty
             NeedInput
               | T.null input -> finish atLineStart' acc'
               | otherwise ->
-                  let (line, rest) = breakLine input
-                   in go atLineStart' acc' (provideInput (T.strip line) vm') rest
+                  let (line, term, rest) = breakInput vm' input
+                   in go atLineStart' acc' (provideInputTerminated term line vm') rest
             NeedChar -> case T.uncons input of
               Nothing -> finish atLineStart' acc'
               Just (c, rest) -> go atLineStart' acc' (provideChar (charZscii c) vm') rest
     finish atLineStart acc
       | atLineStart = acc
       | otherwise = acc <> "\n"
-    breakLine t = let (line, rest) = T.break (== '\n') t in (line, T.drop 1 rest)
+    breakInput vm = scanInput T.empty
+      where
+        hdr = vmHeader vm
+        mem = vmMemory vm
+        terminators = inputTerminators vm
+        scanInput acc t = case T.uncons t of
+          Nothing -> (acc, 13, T.empty)
+          Just (c, rest) -> case charToZsciiInStory mem hdr c of
+            Just code
+              | code `elem` terminators -> (acc, code, rest)
+            _ -> scanInput (acc <> T.singleton c) rest
     charZscii c = if c == '\n' then 13 else fromIntegral (fromEnum c)
 
 -- | Precise input\/output tests: each purpose-built story is driven

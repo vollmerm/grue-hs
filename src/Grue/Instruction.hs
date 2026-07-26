@@ -3,8 +3,8 @@
 -- An instruction is an opcode byte (giving the form, operand count and
 -- opcode number), operand type information, the operands themselves,
 -- and then, depending on the particular operation: a store variable, a
--- branch offset, and inline text.  This module decodes the version 3 and
--- 4 instruction sets into a typed representation; execution is left to
+-- branch offset, and inline text.  This module decodes the version 3 to
+-- 5 instruction sets into a typed representation; execution is left to
 -- the interpreter.
 module Grue.Instruction
   ( Op (..)
@@ -13,6 +13,7 @@ module Grue.Instruction
   , BranchDest (..)
   , Instruction (..)
   , decode
+  , decodeForExec
   , decodeBranch
   , storesResult
   , takesBranch
@@ -25,7 +26,7 @@ import Grue.Header
 import Grue.Memory
 import Grue.ZString
 
--- | The version 3 and 4 operations.
+-- | The version 3 to 5 operations.
 data Op
   = -- 2OP
     Je
@@ -53,6 +54,9 @@ data Op
   | Div
   | Mod
   | Call2s
+  | Call2n
+  | Throw
+  | SetColour
   | -- 1OP
     Jz
   | GetSibling
@@ -70,6 +74,7 @@ data Op
   | Load
   | Not
   | Call1s
+  | Call1n
   | -- 0OP
     Rtrue
   | Rfalse
@@ -81,10 +86,12 @@ data Op
   | Restart
   | RetPopped
   | Pop
+  | Catch
   | Quit
   | NewLine
   | ShowStatus
   | Verify
+  | Piracy
   | -- VAR
     Call
   | Storew
@@ -102,6 +109,8 @@ data Op
   | InputStream
   | SoundEffect
   | CallVs2
+  | CallVn
+  | CallVn2
   | EraseWindow
   | EraseLine
   | SetCursor
@@ -110,6 +119,14 @@ data Op
   | BufferMode
   | ReadChar
   | ScanTable
+  | CheckArgCount
+  | Tokenise
+  | EncodeText
+  | CopyTable
+  | PrintTable
+  | -- EXT
+    LogShift
+  | ArtShift
   deriving (Eq, Show)
 
 -- | A decoded operand.  Variable operands are resolved to values at
@@ -149,7 +166,7 @@ data Instruction = Instruction
   deriving (Eq, Show)
 
 -- | The number of operands an opcode form declares.
-data OpCount = Count0 | Count1 | Count2 | CountVar
+data OpCount = Count0 | Count1 | Count2 | CountVar | CountExt
   deriving (Eq, Show)
 
 -- | Look up an operation by version, operand count and opcode number.
@@ -181,6 +198,9 @@ lookupOp v Count2 n = case n of
   23 -> Just Div
   24 -> Just Mod
   25 | v >= 4 -> Just Call2s
+  26 | v >= 5 -> Just Call2n
+  27 | v >= 5 -> Just SetColour
+  28 | v >= 5 -> Just Throw
   _ -> Nothing
 lookupOp v Count1 n = case n of
   0 -> Just Jz
@@ -198,9 +218,11 @@ lookupOp v Count1 n = case n of
   12 -> Just Jump
   13 -> Just PrintPaddr
   14 -> Just Load
-  15 -> Just Not
+  15
+    | v >= 5 -> Just Call1n
+    | otherwise -> Just Not
   _ -> Nothing
-lookupOp _ Count0 n = case n of
+lookupOp v Count0 n = case n of
   0 -> Just Rtrue
   1 -> Just Rfalse
   2 -> Just Print
@@ -210,11 +232,14 @@ lookupOp _ Count0 n = case n of
   6 -> Just Restore
   7 -> Just Restart
   8 -> Just RetPopped
-  9 -> Just Pop
+  9
+    | v >= 5 -> Just Catch
+    | otherwise -> Just Pop
   10 -> Just Quit
   11 -> Just NewLine
   12 -> Just ShowStatus
   13 -> Just Verify
+  15 | v >= 5 -> Just Piracy
   _ -> Nothing
 lookupOp v CountVar n = case n of
   0 -> Just Call
@@ -241,11 +266,25 @@ lookupOp v CountVar n = case n of
   21 -> Just SoundEffect
   22 | v >= 4 -> Just ReadChar
   23 | v >= 4 -> Just ScanTable
+  24 | v >= 5 -> Just Not
+  25 | v >= 5 -> Just CallVn
+  26 | v >= 5 -> Just CallVn2
+  27 | v >= 5 -> Just Tokenise
+  28 | v >= 5 -> Just EncodeText
+  29 | v >= 5 -> Just CopyTable
+  30 | v >= 5 -> Just PrintTable
+  31 | v >= 5 -> Just CheckArgCount
+  _ -> Nothing
+lookupOp v CountExt n = case n of
+  0 | v >= 5 -> Just Save
+  1 | v >= 5 -> Just Restore
+  2 | v >= 5 -> Just LogShift
+  3 | v >= 5 -> Just ArtShift
   _ -> Nothing
 
 -- | Whether an operation is followed by a store variable byte.
-storesResult :: Op -> Bool
-storesResult op =
+storesResult :: Int -> Op -> Bool
+storesResult v op =
   op
     `elem` [ Or
            , And
@@ -268,15 +307,19 @@ storesResult op =
            , Call
            , Call1s
            , Call2s
+           , Catch
            , CallVs2
            , Random
            , ReadChar
            , ScanTable
+           , LogShift
+           , ArtShift
            ]
+    || (v >= 5 && op `elem` [Sread, Save, Restore])
 
 -- | Whether an operation is followed by branch information.
-takesBranch :: Op -> Bool
-takesBranch op =
+takesBranch :: Int -> Op -> Bool
+takesBranch v op =
   op
     `elem` [ Je
            , Jl
@@ -289,11 +332,12 @@ takesBranch op =
            , Jz
            , GetSibling
            , GetChild
-           , Save
-           , Restore
            , Verify
+           , Piracy
            , ScanTable
+           , CheckArgCount
            ]
+    || (v <= 4 && op `elem` [Save, Restore])
 
 -- | Whether an operation is followed by inline text.
 takesText :: Op -> Bool
@@ -303,18 +347,29 @@ takesText op = op == Print || op == PrintRet
 -- the address of the next one.  An unknown opcode is an error: it
 -- means the story is corrupt, or execution has jumped into data.
 decode :: Memory -> Header -> Int -> (Instruction, Int)
-decode mem hdr pc0 = (inst, pcText)
+decode mem hdr pc0 = (\(inst, _, next) -> (inst, next)) (decodeForExec mem hdr pc0)
+
+-- | Decode the instruction at an address, also returning the byte address
+-- of its store variable when one is present.
+decodeForExec :: Memory -> Header -> Int -> (Instruction, Maybe Int, Int)
+decodeForExec mem hdr pc0 = (inst, storeAt, pcText)
   where
     opByte = peekByte mem pc0
 
     (count, opNum, operandSpec, pcOperands) = case opByte of
       b
+        | v >= 5 && b == 0xbe ->
+            ( CountExt
+            , fromIntegral (peekByte mem (pc0 + 1))
+            , takeWhile (/= 3) (typeBits (peekByte mem (pc0 + 2)))
+            , pc0 + 3
+            )
         | b >= 0xc0 ->
             -- Variable form: one type byte follows the opcode, or two
             -- for the "double variable" call, which takes up to eight
             -- operands.
             let num = fromIntegral (b .&. 31)
-                double = testBit b 5 && num == 12
+                double = testBit b 5 && num `elem` doubleVarOps v
                 types
                   | double =
                       typeBits (peekByte mem (pc0 + 1))
@@ -341,8 +396,11 @@ decode mem hdr pc0 = (inst, pcText)
             )
 
     longType var = if var then 2 else 1
+    v = zVersion hdr
+    doubleVarOps version =
+      [12 | version >= 4] ++ [26 | version >= 5]
 
-    op = case lookupOp (zVersion hdr) count opNum of
+    op = case lookupOp v count opNum of
       Just o -> o
       Nothing ->
         error
@@ -356,12 +414,12 @@ decode mem hdr pc0 = (inst, pcText)
 
     (operands, pcStore) = readOperands operandSpec pcOperands
 
-    (store, pcBranch)
-      | storesResult op = (Just (peekByte mem pcStore), pcStore + 1)
-      | otherwise = (Nothing, pcStore)
+    (storeAt, store, pcBranch)
+      | storesResult v op = (Just pcStore, Just (peekByte mem pcStore), pcStore + 1)
+      | otherwise = (Nothing, Nothing, pcStore)
 
     (branch, pcAfterBranch)
-      | takesBranch op =
+      | takesBranch v op =
           let (b, end) = decodeBranch mem pcBranch in (Just b, end)
       | otherwise = (Nothing, pcBranch)
 

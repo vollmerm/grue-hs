@@ -13,7 +13,7 @@ module Grue.Quetzal
   , restoreState
   ) where
 
-import Data.Bits (popCount, shiftL, shiftR, xor, (.&.))
+import Data.Bits (popCount, shiftL, shiftR, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List.NonEmpty (nonEmpty)
@@ -25,8 +25,9 @@ import Grue.Memory
 import Grue.VM
 
 -- | Serialize the machine into a Quetzal save.  The given address is
--- where execution resumes on restore: in versions 3 and 4, the branch
--- data of the @save@ instruction being executed.
+-- where execution resumes on restore: the branch data of the active
+-- @save@ in versions 3 and 4, or the store byte of that instruction in
+-- version 5.
 saveState :: VM -> Int -> ByteString
 saveState vm resumePC =
   form
@@ -150,13 +151,16 @@ frameBytes :: Frame -> ByteString
 frameBytes f =
   BS.pack $
     w24 (frameReturnPC f)
-      ++ [fromIntegral (Seq.length (frameLocals f))]
+      ++ [flags]
       ++ [frameStore f]
       ++ [argsMask (frameArgs f)]
       ++ w16 (length (frameEval f))
       ++ concatMap (w16 . fromIntegral) (frameLocals f)
       ++ concatMap (w16 . fromIntegral) (reverse (frameEval f))
   where
+    flags =
+      fromIntegral (Seq.length (frameLocals f))
+        .|. if frameDiscardResult f then 0x10 else 0
     argsMask n = (1 `shiftL` n) - 1
 
 -- | Parse the frames of a Stks chunk, oldest first.
@@ -169,7 +173,8 @@ parseFrames bytes = go 0
       | end > BS.length bytes = Left "Quetzal: truncated stack frame"
       | otherwise = (frame :) <$> go end
       where
-        nLocals = fromIntegral (BS.index bytes (i + 3)) .&. 15
+        flags = BS.index bytes (i + 3)
+        nLocals = fromIntegral flags .&. 15
         nEval = fromIntegral (readW16 bytes (i + 6))
         end = i + 8 + 2 * (nLocals + nEval)
         word k = fromIntegral (readW16 bytes (i + 8 + 2 * k))
@@ -179,6 +184,7 @@ parseFrames bytes = go 0
             , frameEval =
                 reverse (map (word . (+ nLocals)) [0 .. nEval - 1])
             , frameReturnPC = readW24 bytes i
+            , frameDiscardResult = flags .&. 0x10 /= 0
             , frameStore = BS.index bytes (i + 4)
             , frameArgs = popCount (BS.index bytes (i + 5))
             }
