@@ -8,7 +8,7 @@ import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.List (sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
 import Data.Word (Word16, Word64, Word8)
@@ -129,10 +129,9 @@ storySpecs =
       }
   ]
 
--- | Where the external story collection lives: the @GRUE_STORY_DIR@
--- environment variable, or a @zifmia@ checkout beside this repository.
-storyRoot :: IO FilePath
-storyRoot = fromMaybe "../zifmia" <$> lookupEnv "GRUE_STORY_DIR"
+-- | Where the external story collection lives, if configured.
+storyRoot :: IO (Maybe FilePath)
+storyRoot = lookupEnv "GRUE_STORY_DIR"
 
 -- | A story that was found and loaded.
 data Story = Story
@@ -145,24 +144,28 @@ loadStories :: IO [Story]
 loadStories = do
   root <- storyRoot
   let resolve loc = case loc of
-        Bundled path -> path
-        External path -> root </> path
-      load spec = do
-        let path = resolve (specLocation spec)
-        exists <- doesFileExist path
-        if exists
-          then do
-            bytes <- BS.readFile path
-            pure [Story path spec (fromStory bytes)]
-          else pure []
+        Bundled path -> Just path
+        External path -> (</> path) <$> root
+      load spec = case resolve (specLocation spec) of
+        Nothing -> pure []
+        Just path -> do
+          exists <- doesFileExist path
+          if exists
+            then do
+              bytes <- BS.readFile path
+              pure [Story path spec (fromStory bytes)]
+            else pure []
   concat <$> mapM load storySpecs
 
 loadCzechV5 :: IO (Maybe FilePath)
 loadCzechV5 = do
   root <- storyRoot
-  let path = root </> "testers/czech/czech.z5"
-  exists <- doesFileExist path
-  pure (if exists then Just path else Nothing)
+  case root of
+    Nothing -> pure Nothing
+    Just dir -> do
+      let path = dir </> "testers/czech/czech.z5"
+      exists <- doesFileExist path
+      pure (if exists then Just path else Nothing)
 
 -- | A little memory image with recognizable contents: byte @i@ holds
 -- value @i@ for the first 256 bytes.

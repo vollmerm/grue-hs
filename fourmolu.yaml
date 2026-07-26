@@ -1,6 +1,3 @@
-# Formatting rules for fourmolu (https://fourmolu.github.io).
-# Check: fourmolu --mode check src app test
-# Apply: fourmolu --mode inplace src app test
 indentation: 2
 column-limit: none
 function-arrows: trailing

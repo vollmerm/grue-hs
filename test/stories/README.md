@@ -18,6 +18,5 @@ something real to run, regardless of what is installed on the machine.
 
 Commercial story files (the Infocom games) are not distributable and
 are therefore looked up outside the repository: in the directory named
-by the `GRUE_STORY_DIR` environment variable, or failing that in a
-`zifmia` story collection checked out beside this repository. Tests
-for stories that cannot be found are skipped.
+by the `GRUE_STORY_DIR` environment variable. Tests for stories that
+cannot be found are skipped.
